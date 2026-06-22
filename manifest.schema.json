@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SynthWatch monitors manifest",
+  "type": "object",
+  "required": ["schemaVersion", "monitors"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "description": { "type": "string" },
+    "monitors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "script", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+            "description": "Stable unique identifier SynthWatch monitors bind to. Lowercase, hyphens, 3-64 chars. NEVER reuse or repurpose an id (a monitor references it); to retire, remove the monitor in SynthWatch first."
+          },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "script": {
+            "type": "string",
+            "pattern": "^monitors/.+\\.spec\\.ts$",
+            "description": "Path to the Playwright script, relative to repo root, under monitors/."
+          },
+          "kind": { "type": "string", "enum": ["browser"] },
+          "suggestedIntervalSeconds": { "type": "integer", "minimum": 60 },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" },
+          "target": { "type": "string" },
+          "enabledByDefault": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

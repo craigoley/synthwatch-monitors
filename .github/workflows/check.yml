@@ -1,0 +1,37 @@
+name: Check
+
+# Gate every monitor PR: the manifest stays in sync with the scripts, the
+# scripts type-check, and every script parses as a valid Playwright test. A
+# broken monitor script must NOT reach main (and therefore must not sync to
+# SynthWatch prod). Same governance posture as the other SynthWatch repos.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci || npm install
+      - name: Install Playwright (deps only, no browsers needed for --list)
+        run: npx playwright install-deps || true
+      - name: Validate manifest (registry <-> scripts in sync)
+        run: npm run validate:manifest
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Compile-check scripts (every spec parses + lists)
+        run: npx playwright test --list

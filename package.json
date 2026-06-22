@@ -1,0 +1,22 @@
+{
+  "name": "synthwatch-monitors",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Playwright monitor scripts for SynthWatch. Each script is a synthetic-monitoring browser flow; SynthWatch syncs this repo and runs the scripts as monitors. Edit a monitor = a PR here (reviewed + gated), synced live without a SynthWatch redeploy.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "validate:manifest": "node scripts/validate-manifest.mjs",
+    "test:compile": "playwright test --list",
+    "check": "npm run validate:manifest && npm run typecheck && npm run test:compile"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

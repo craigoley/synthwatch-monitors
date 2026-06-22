@@ -1,0 +1,40 @@
+{
+  "$schema": "./manifest.schema.json",
+  "schemaVersion": 1,
+  "description": "SynthWatch monitor registry. Each entry binds a stable `id` (the key SynthWatch monitors reference) to a Playwright script in monitors/. The SCRIPT (the how) lives here; the MONITORING CONFIG (interval, locations, alerting, enabled) lives in SynthWatch's DB bound to this id. SynthWatch discovers scripts by reading this manifest after syncing the repo. Add a monitor by adding a .spec.ts under monitors/ AND an entry here; CI validates the two stay in sync.",
+  "monitors": [
+    {
+      "id": "wegmans-search-product",
+      "name": "Wegmans: search \u2192 product page",
+      "script": "monitors/wegmans/search-product.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "ecommerce", "search", "journey"],
+      "description": "Search wegmans.com for ginger sparkling water, open the Wegmans-brand product, assert the product page loads.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-recipe-nav",
+      "name": "Wegmans: recipe navigation",
+      "script": "monitors/wegmans/recipe-nav.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "recipes", "navigation", "journey"],
+      "description": "Navigate Meals & Recipes \u2192 Courses \u2192 Dinner \u2192 the cauliflower-crust pesto pizza recipe, assert the recipe loads.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "synthwatch-self-homepage",
+      "name": "SynthWatch dashboard homepage",
+      "script": "monitors/synthwatch/dashboard-homepage.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 600,
+      "tags": ["synthwatch", "self", "smoke"],
+      "description": "Example/self-monitoring flow: the SynthWatch dashboard loads and renders the monitor grid. Template for new flows.",
+      "target": "https://synthwatch-dashboard.vercel.app",
+      "enabledByDefault": false
+    }
+  ]
+}
