@@ -24,7 +24,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          # No `cache: npm` — this repo has no committed lock file, and setup-node's npm cache
+          # ERRORS when no package-lock.json/npm-shrinkwrap.json exists ("Dependencies lock file
+          # is not found"), which broke `Check` on main. Install below handles the no-lock case.
       - name: Install
         run: npm ci || npm install
       - name: Install Playwright (deps only, no browsers needed for --list)
