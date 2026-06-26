@@ -6,12 +6,16 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
  * Journey: go to wegmans.com -> search "ginger sparkling water" -> open the
  * Wegmans-brand ginger sparkling water product -> assert the product page loads.
  *
- * NOTE (selectors): the locators below are RESILIENT GUESSES based on a typical
- * commercetools/MACH storefront. They MUST be verified against the live site on
- * first run -- wegmans.com's actual search input, result-card, and product-page
- * structure may differ. When SynthWatch runs this the first time, if a step
- * fails, the trace + screenshot show the real DOM; update the locator to match.
- * Do NOT assume these are correct until a real run confirms them.
+ * NOTE (selectors): VERIFIED against run #844486's trace on the live site.
+ * Steps 1-3 (open wegmans.com / search / open the product) pass with the locators
+ * below. Step 4 originally asserted a `/\/product\//i` URL, but Wegmans is an SPA:
+ * opening a product does NOT navigate to a /product/ route -- the product detail
+ * renders on the same `/shop/search?query=…` URL (the trace captured no /product/
+ * navigation), so that URL check could never match even though the product page
+ * was correctly loaded. Step 4 now asserts the product DETAIL via DOM signals the
+ * trace confirms (the product title + the "Add to List" CTA) -- resilient to
+ * price/copy/URL changes. If a step fails, the trace + screenshot show the real
+ * DOM; update the locator to match.
  */
 test('Wegmans: search -> ginger sparkling water product', async ({ page }) => {
   await step('open wegmans.com', async () => {
@@ -45,12 +49,16 @@ test('Wegmans: search -> ginger sparkling water product', async ({ page }) => {
 
   await step('assert product page loaded', async () => {
     await dismissInterstitials(page);
-    // Stable signals: a product URL shape AND the product title visible.
-    // Verify the real product URL pattern on first run and tighten this regex.
+    // Wegmans renders the product detail on the /shop/search?query=… URL (SPA — no /product/
+    // route; verified from run #844486's trace). Assert the product DETAIL via DOM signals the
+    // trace confirms are present: the product title heading, plus the "Add to List" CTA (the
+    // product-detail action — resilient to price/copy changes, unlike a URL or a hard-coded price).
     await assertLoaded(page, {
-      urlPattern: /\/product\//i,
-      visibleText: /ginger.*sparkling/i,
+      visibleText: /wegmans ginger sparkling water/i,
       timeoutMs: 15000,
     });
+    await expect(
+      page.getByRole('button', { name: /add .*to list/i }).first(),
+    ).toBeVisible({ timeout: 15000 });
   });
 });
