@@ -6,13 +6,14 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
  * Journey: wegmans.com -> Meals & Recipes -> Courses -> Dinner -> the
  * "Pesto Tomato and Spinach Cauliflower Crust Pizza" recipe -> assert it loads.
  *
- * NOTE (selectors + nav path): the navigation path ("Meals & Recipes" ->
- * "Courses" -> "Dinner") and the exact recipe name are ASSUMPTIONS about the
- * site's structure. The real nav may differ (a mega-menu, a different category
- * tree, the recipe may have moved). Verify against the live site on the first
- * run; the trace + screenshot will show the real structure. If the path differs,
- * the run fails at the specific step and the real DOM is captured -- update to
- * match rather than guessing repeatedly.
+ * NOTE (selectors + nav path): on /recipes the categories are ARIA TABS, and
+ * "Courses" is a role="tab" (id=category-tab-courses) whose panel is lazy-rendered
+ * on click -- VERIFIED from run #844724's trace. The Courses step now clicks that
+ * tab. "Dinner" and the exact recipe name remain best-effort: Dinner's markup isn't
+ * observable until the Courses tab opens (its panel is empty+hidden in the trace),
+ * so its selector is a resilient name match scoped to the revealed panel; the recipe
+ * may move. If a step fails, the trace + screenshot capture the real DOM -- update
+ * that step to match rather than guessing repeatedly.
  */
 test('Wegmans: recipe nav -> cauliflower-crust pesto pizza', async ({ page }) => {
   await step('open wegmans.com', async () => {
@@ -31,15 +32,25 @@ test('Wegmans: recipe nav -> cauliflower-crust pesto pizza', async ({ page }) =>
 
   await step('navigate Courses -> Dinner', async () => {
     await dismissInterstitials(page);
-    // Some sites expose "Courses" then "Dinner"; others go straight to a
-    // category list. Try Courses first (best-effort), then Dinner.
-    const courses = page.getByRole('link', { name: /^courses$/i }).first();
-    try {
-      if (await courses.isVisible({ timeout: 3000 })) await courses.click();
-    } catch {
-      /* category tree may not nest under Courses; continue to Dinner */
-    }
-    const dinner = page.getByRole('link', { name: /^dinner$/i }).first();
+    // Wegmans /recipes groups categories into ARIA TABS: Top Categories / Courses / Main
+    // Ingredient / Dietary Preferences / Time. "Courses" is a role="tab" (id=category-tab-courses,
+    // aria-controls=category-tabpanel-courses) — NOT a link, and its panel is lazy: empty + hidden
+    // until the tab is clicked. (Verified from run #844724's trace DOM — the old `link name=courses`
+    // selector never matched, so its best-effort click was skipped and the Dinner wait timed out.)
+    // So we MUST click the Courses tab to reveal the panel that holds Dinner.
+    const coursesTab = page.getByRole('tab', { name: /courses/i }).first();
+    await expect(coursesTab).toBeVisible({ timeout: 15000 });
+    await coursesTab.click();
+
+    // Dinner renders into the now-revealed Courses panel. Scope to that panel (#category-
+    // tabpanel-courses) so the "Weeknight dinners made easy" page heading can't false-match, and
+    // accept link OR button (Dinner's exact role isn't observable until the tab opens). Resilient
+    // name match (starts with "dinner"), not the brittle exact-link the real DOM doesn't satisfy.
+    const coursesPanel = page.locator('#category-tabpanel-courses');
+    const dinner = coursesPanel
+      .getByRole('link', { name: /^dinner\b/i })
+      .or(coursesPanel.getByRole('button', { name: /^dinner\b/i }))
+      .first();
     await expect(dinner).toBeVisible({ timeout: 15000 });
     await dinner.click();
   });
