@@ -3,19 +3,22 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
 /**
  * Monitor: wegmans-recipe-nav
  *
- * Journey: wegmans.com -> Meals & Recipes -> Courses -> Dinner -> the
- * "Pesto Tomato and Spinach Cauliflower Crust Pizza" recipe -> assert it loads.
+ * Journey: wegmans.com -> Meals & Recipes -> Courses -> Dinner -> open the FIRST
+ * dinner recipe -> assert a recipe detail page loaded.
  *
  * NOTE (selectors + nav path): on /recipes the categories are ARIA TABS, and
  * "Courses" is a role="tab" (id=category-tab-courses) whose panel is lazy-rendered
- * on click -- VERIFIED from run #844724's trace. The Courses step now clicks that
- * tab. "Dinner" and the exact recipe name remain best-effort: Dinner's markup isn't
- * observable until the Courses tab opens (its panel is empty+hidden in the trace),
- * so its selector is a resilient name match scoped to the revealed panel; the recipe
- * may move. If a step fails, the trace + screenshot capture the real DOM -- update
- * that step to match rather than guessing repeatedly.
+ * on click -- VERIFIED from run #844724's trace. The Courses step clicks that tab.
+ * ★ Step 4 is RECIPE-AGNOSTIC by design: it clicks whatever recipe is FIRST in the
+ * Dinner results (a card link wrapping <img data-testid="img-recipe-card">) and
+ * asserts a recipe DETAIL page loaded via STRUCTURAL signals (a /recipes/<cat>/<slug>
+ * URL + an ingredients/directions section), NOT a specific recipe name or slug -- so
+ * it survives the catalog reordering that broke the old cauliflower-pizza selector
+ * (run #844753). The detail-page DOM isn't observable until a recipe is opened; the
+ * card selector + URL pattern are verified from the trace, the detail signal is
+ * recipe-agnostic. If a step fails, the trace captures the real DOM -- update to match.
  */
-test('Wegmans: recipe nav -> cauliflower-crust pesto pizza', async ({ page }) => {
+test('Wegmans: recipe nav -> first dinner recipe detail', async ({ page }) => {
   await step('open wegmans.com', async () => {
     await page.goto('https://www.wegmans.com', { waitUntil: 'domcontentloaded' });
     await dismissInterstitials(page);
@@ -55,29 +58,35 @@ test('Wegmans: recipe nav -> cauliflower-crust pesto pizza', async ({ page }) =>
     await dinner.click();
   });
 
-  await step('open the cauliflower-crust pesto pizza recipe', async () => {
+  await step('open the first dinner recipe', async () => {
     await dismissInterstitials(page);
-    const recipe = page
-      .getByRole('link', { name: /pesto .*(tomato|spinach).*cauliflower.*crust.*pizza/i })
-      .or(page.getByText(/pesto .*(tomato|spinach).*cauliflower.*crust.*pizza/i))
+    // RESILIENT to catalog reordering: click whatever recipe is FIRST, not a named one (the old
+    // cauliflower-pizza selector broke when the recipe was reordered out of view). A recipe RESULT
+    // card is a link wrapping an <img data-testid="img-recipe-card"> (class component--recipe-card,
+    // href /recipes/<category>/<slug>) — verified from run #844753's trace. Filtering links by that
+    // card-image test hook scopes to real results, excluding the curated /recipes/collections/ cards
+    // (which wrap a <figure> with no such testid) and any tab/filter/nav link.
+    const firstRecipe = page
+      .getByRole('link')
+      .filter({ has: page.getByTestId('img-recipe-card') })
       .first();
-    await expect(recipe).toBeVisible({ timeout: 15000 });
-    await recipe.click();
+    await expect(firstRecipe).toBeVisible({ timeout: 15000 });
+    await firstRecipe.click();
   });
 
-  await step('assert recipe loaded', async () => {
+  await step('assert a recipe detail page loaded', async () => {
     await dismissInterstitials(page);
-    // Stable signals: the recipe title visible AND a recipe page indicator
-    // (ingredients/instructions present, or a recipe URL shape). Tighten after
-    // a real run confirms the actual URL + page structure.
+    // RECIPE-AGNOSTIC "a detail page rendered" (no specific name/slug): the URL is a recipe DETAIL
+    // path /recipes/<category>/<slug> (two segments — distinguishes it from the /recipes/search
+    // listing; the result cards link to e.g. /recipes/main-dishes/<slug>, verified from the trace).
     await assertLoaded(page, {
-      urlPattern: /\/recipes?\//i,
-      visibleText: /cauliflower.*crust.*pizza/i,
+      urlPattern: /\/recipes\/[a-z][a-z0-9-]*\/[a-z0-9-]+/i,
       timeoutMs: 15000,
     });
-    // A second resilient signal that it's a real recipe page, not a 404/listing:
+    // Structural signal true for ANY recipe page but NOT the listing (a search/listing has no
+    // ingredients/directions section). Recipe-agnostic — proves a recipe detail, not which recipe.
     await expect(
-      page.getByText(/ingredients/i).or(page.getByText(/instructions|directions/i)).first(),
+      page.getByText(/ingredients/i).or(page.getByText(/directions|instructions/i)).first(),
     ).toBeVisible({ timeout: 15000 });
   });
 });
