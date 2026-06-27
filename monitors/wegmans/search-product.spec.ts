@@ -24,6 +24,13 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
  * Product assertions match ANY ginger-sparkling-water result (not one specific product) — the
  * recurring resilience lesson: assert the CAPABILITY (a relevant product is reachable), resilient
  * to catalog reorder. Step 'assert' uses DOM signals (title + "Add to List" CTA), not a URL/price.
+ *
+ * ★ PRODUCT-CLICK FIX (run #845953): the open-product step targets the real product <a> by its
+ * /shop/product/ href. The previous `.or(getByText(/ginger.*sparkling/i))` fallback matched an
+ * invisible screen-reader label (<span class="tw:sr-only">) — un-clickable + under the sticky
+ * header → pointer-intercept → 30s timeout. Anchoring on a[href*="/shop/product/"] hits the real,
+ * clickable card. (The link is aria-haspopup="dialog" — clicking opens a quick-view on the
+ * /shop/search URL, so the assert stays DOM-signal based, NOT a /shop/product/ URL check.)
  */
 test('Wegmans: search -> ginger sparkling water product', async ({ page }) => {
   await step('open the ginger sparkling water search results', async () => {
@@ -37,11 +44,17 @@ test('Wegmans: search -> ginger sparkling water product', async ({ page }) => {
 
   await step('open the first ginger sparkling water product', async () => {
     await dismissInterstitials(page);
-    // ANY ginger-sparkling-water result (resilient to reorder / brand changes), not one specific
-    // product. .first() takes the top result.
+    // ★ Target the REAL product <a> by its /shop/product/ href — NOT getByText. The old
+    // `.or(getByText(/ginger.*sparkling/i))` fallback matched an invisible a11y label
+    // (<span class="tw:sr-only">Ginger sparkling water</span>), which is un-clickable and sits
+    // under the sticky header → 'subtree intercepts pointer events' → 30s timeout (run #845953).
+    // The result cards are clean links: <a class="tw:text-left" href="/shop/product/<id>-Ginger-
+    // Sparkling-Water-…">. Scoping to a[href*="/shop/product/"] excludes the sr-only span (it's a
+    // <span>, no href) AND gives a real, full-card click target the header can't intercept.
+    // ANY ginger-sparkling result (resilient to reorder / SKU), .first() = the top one.
     const product = page
-      .getByRole('link', { name: /ginger.*sparkling/i })
-      .or(page.getByText(/ginger.*sparkling/i))
+      .locator('a[href*="/shop/product/"]')
+      .filter({ hasText: /ginger.*sparkling/i })
       .first();
     await expect(product).toBeVisible({ timeout: 15000 });
     await product.click();
