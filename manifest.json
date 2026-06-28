@@ -35,6 +35,61 @@
       "description": "Example/self-monitoring flow: the SynthWatch dashboard loads and renders the monitor grid. Template for new flows.",
       "target": "https://synthwatch-dashboard.vercel.app",
       "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-homepage-load",
+      "name": "Wegmans: homepage load",
+      "script": "monitors/wegmans/homepage-load.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 900,
+      "tags": ["wegmans", "smoke", "homepage"],
+      "description": "Load wegmans.com and assert the homepage renders with core navigation and shopping content.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-shop-category-browse",
+      "name": "Wegmans: shop category browse",
+      "script": "monitors/wegmans/shop-category-browse.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "ecommerce", "browse", "journey"],
+      "description": "Browse the Beverages department, open the first product, assert the product detail loads.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-store-locator",
+      "name": "Wegmans: store locator",
+      "script": "monitors/wegmans/store-locator.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "stores", "locator", "journey"],
+      "description": "Open the store locator, search for Buffalo NY, assert at least one store result appears.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-meals2go-homepage",
+      "name": "Meals 2 Go: homepage load",
+      "script": "monitors/wegmans/meals2go-homepage.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 900,
+      "tags": ["wegmans", "meals2go", "smoke", "homepage"],
+      "description": "Load meals2go.com and assert the Meals 2 Go homepage renders with ordering UI.",
+      "target": "https://www.meals2go.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-recipe-search",
+      "name": "Wegmans: recipe search",
+      "script": "monitors/wegmans/recipe-search.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "recipes", "search", "journey"],
+      "description": "Search for chicken recipes, open the first result, assert the recipe detail page loads.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
     }
   ]
 }
