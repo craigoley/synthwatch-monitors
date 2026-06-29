@@ -30,6 +30,12 @@ export async function step<T>(name: string, body: () => Promise<T>): Promise<T> 
   return test.step(name, body);
 }
 
+// Parity: the block between the >>> and <<< markers below is VENDORED into the runner's
+// specfetch/specShim.ts (the copy the runner EXECUTES); this lib/flow.ts is the AUTHORING copy and is
+// DEAD AT RUNTIME (the runner esbuild-aliases the spec's lib/flow import to specShim). The runner's CI
+// (scripts/check-libflow-parity.mjs) hashes this exact block — a change here FAILS runner CI until it
+// is mirrored into specShim.ts and its LIBFLOW-VENDOR-SHA is bumped. KEEP IN SYNC.
+// >>> SHARED-WITH-RUNNER-SPECSHIM
 /**
  * Assert a page "loaded" using STABLE signals rather than DOM structure:
  *  - the URL matches an expected pattern (e.g. a product/recipe URL shape), and
@@ -125,3 +131,4 @@ export async function dismissInterstitials(page: Page): Promise<void> {
     }
   }
 }
+// <<< SHARED-WITH-RUNNER-SPECSHIM
