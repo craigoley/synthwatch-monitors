@@ -56,10 +56,26 @@ test('Wegmans: shop category browse -> first product', async ({ page }) => {
 
   await step('assert product detail loaded', async () => {
     await dismissInterstitials(page);
-    // VERIFIED pattern from search-product.spec.ts: the product detail renders an
-    // "Add to List" CTA button. This proves the detail view loaded, product-agnostic.
+    // ★ SCOPE TO THE OPENED QUICK-VIEW, not page-wide (mirror of the #26 search-product fix).
+    // Clicking a result card opens a native <dialog class="component--product-details-dialog">.
+    // The RESULTS PAGE already shows "Add to List" on every product card (11 visible), so a
+    // page-wide getByRole('button',{name:/add .*to list/i}) passed even when no product opened
+    // (false positive — could not go red). The detail container .component--product-details is
+    // ABSENT on the bare results page, so scoping every signal to it holds ONLY when the
+    // quick-view is actually open.
+    const productDetail = page
+      .locator('dialog.component--product-details-dialog')
+      .or(page.locator('.component--product-details'))
+      .or(page.getByRole('dialog'))
+      .first();
     await expect(
-      page.getByRole('button', { name: /add .*to list/i }).first(),
+      productDetail,
+      'product quick-view did not open after clicking the result — the click no-opped (no detail dialog).',
+    ).toBeVisible({ timeout: 15000 });
+    // The "Add to List" CTA, SCOPED to the opened dialog (not the page). Fails if no detail opened.
+    await expect(
+      productDetail.getByRole('button', { name: /add .*to list/i }).first(),
+      'opened quick-view does not show the product-detail "Add to List" CTA.',
     ).toBeVisible({ timeout: 15000 });
   });
 });

@@ -3,63 +3,72 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
 /**
  * Monitor: wegmans-store-locator
  *
- * Journey: wegmans.com/stores → assert the store locator page loads → search for
- * stores near "Buffalo, NY" → assert at least one store result appears.
+ * Journey: wegmans.com/stores (the store DIRECTORY) → open a Buffalo-area store →
+ * assert the store DETAIL page loaded.
  *
  * The store locator is critical for an omnichannel grocer — it drives foot traffic,
  * and the store-selection flow gates other features (pickup, Meals 2 Go ordering).
- * If the locator breaks, users can't find their store.
  *
- * ★UNVERIFIED — the /stores URL and search interaction are best guesses based on
- * standard grocery-site patterns. The search input, results rendering, and store-
- * card selectors all need live verification. "Buffalo, NY" is chosen because the
- * original task references a Buffalo/McKinley store, confirming Wegmans operates
- * there.
+ * ★ LIVE-DOM RECON (fixed a FALSE POSITIVE): /stores is a static DIRECTORY of store
+ * links (<a href="/stores/<slug>">Store Name</a>, e.g. "Alberta Dr." → /stores/
+ * alberta-dr-ny — 115 stores, 9 Buffalo-area). It is NOT a search-box + results page:
+ * the only input is the GLOBAL header search (#site-header-search-input,
+ * placeholder "What can we help you find?"), so the old "fill Buffalo, NY + Enter"
+ * did a SITE search, not a store search. And the old assertion
+ * getByText(/wegmans|store|miles?|mi/i) matched header/footer CHROME on every page
+ * (10 matches BEFORE any search) → it passed regardless of the search and could NOT
+ * go red. Now we assert the REAL capability, scoped to real store links + the store-
+ * detail page (NOT page-wide text), so a broken directory/navigation FAILS.
  */
-test('Wegmans: store locator -> search Buffalo NY', async ({ page }) => {
-  await step('open the store locator', async () => {
-    // ★UNVERIFIED: /stores is the most common store-locator URL pattern for grocery
-    // sites. If Wegmans uses a different path, this will 404 or redirect — the live
-    // run will reveal the correct URL.
-    await page.goto('https://www.wegmans.com/stores', {
-      waitUntil: 'domcontentloaded',
-    });
+test('Wegmans: store directory -> open a Buffalo-area store detail', async ({ page }) => {
+  await step('open the store directory', async () => {
+    await page.goto('https://www.wegmans.com/stores', { waitUntil: 'domcontentloaded' });
     await dismissInterstitials(page);
   });
 
-  await step('assert store locator loaded', async () => {
+  await step('assert the directory lists a Buffalo-area store', async () => {
     await dismissInterstitials(page);
-    // ★UNVERIFIED: assert the page has a store-finding UI. Look for a search/input
-    // element or visible text referencing stores/locations. Flexible match.
+    // REAL capability (NOT page-wide chrome): the directory renders specific store links
+    // <a href="/stores/<slug>">. Scope to a Buffalo-area store so this proves the directory
+    // actually rendered store content — absent on a broken/empty directory or a CDN error page.
+    const buffaloStore = page
+      .locator('a[href^="/stores/"]')
+      .filter({ hasText: /alberta|amherst|mckinley|sheridan|transit|dick rd|losson|west seneca|hamburg|niagara/i })
+      .first();
+    await expect(
+      buffaloStore,
+      'store directory did not render a Buffalo-area store link (a[href^="/stores/"]) -- the directory may be broken.',
+    ).toBeVisible({ timeout: 15000 });
+  });
+
+  await step('open a Buffalo-area store from the directory', async () => {
+    await dismissInterstitials(page);
+    const buffaloStore = page
+      .locator('a[href^="/stores/"]')
+      .filter({ hasText: /alberta|amherst|mckinley|sheridan|transit|dick rd|losson|west seneca|hamburg|niagara/i })
+      .first();
+    await buffaloStore.click();
+  });
+
+  await step('assert the store detail page loaded', async () => {
+    await dismissInterstitials(page);
+    // VERIFIED (live recon): a store detail lives at /stores/<slug> (e.g. /stores/alberta-dr-ny)
+    // and renders a store-specific "Set as my store" CTA + an address. The URL pattern
+    // distinguishes a real store page from the /stores directory, so a skipped/failed click
+    // (URL stays /stores) FAILS this gate -- the must-go-red anchor (mirrors recipe-search).
     await assertLoaded(page, {
-      visibleText: /stores?|locations?|find/i,
+      urlPattern: /\/stores\/[a-z][a-z0-9-]+/i,
       timeoutMs: 15000,
     });
-  });
-
-  await step('search for Buffalo NY stores', async () => {
-    // ★UNVERIFIED: the store search input could be a text field, a search role, or a
-    // custom component. Try the common patterns: role=searchbox, role=textbox with
-    // store/zip/location placeholder, or a generic input.
-    const searchInput = page
-      .getByRole('searchbox')
-      .or(page.getByRole('textbox', { name: /zip|city|location|search|address/i }))
-      .or(page.locator('input[type="search"], input[type="text"]').first())
-      .first();
-    await expect(searchInput).toBeVisible({ timeout: 15000 });
-    await searchInput.fill('Buffalo, NY');
-    await searchInput.press('Enter');
-  });
-
-  await step('assert store results appeared', async () => {
-    await dismissInterstitials(page);
-    // ★UNVERIFIED: store results should show at least one Wegmans location near
-    // Buffalo. Assert via visible text — any result mentioning a recognizable store
-    // signal (address, phone, hours, "Wegmans", or a store-specific element).
-    // Buffalo area has multiple Wegmans stores (McKinley, Amherst, Alberta Dr, etc.),
-    // so matching any store-like result is resilient.
+    // A store-DETAIL-only signal (absent on the directory + on chrome): the "Set as my store"
+    // CTA, or the store address. Scoped to the detail, not page-wide text.
     await expect(
-      page.getByText(/wegmans|store|miles?|mi\b/i).first(),
+      page
+        .getByRole('button', { name: /set as my store|shop this store|make this/i })
+        .or(page.getByRole('link', { name: /set as my store|shop this store|make this/i }))
+        .or(page.locator('address, [class*="address" i]'))
+        .first(),
+      'store detail did not render a store-specific signal (Set as my store / address).',
     ).toBeVisible({ timeout: 15000 });
   });
 });
