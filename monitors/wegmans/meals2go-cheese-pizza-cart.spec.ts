@@ -276,45 +276,122 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
             });
           await page.waitForTimeout(1500); // bounded settle for the store-selection screen
 
-          // STAGE 2 RECON DUMP [STORE SELECT AFTER ADDRESS] -- the store-selection
-          // screen (nearby stores; McKinley) we have NOT captured. If "McKinley"
-          // appears, this dump's region outerHTML carries its tag/id/role/aria-label/
-          // data-testid + clickable ancestor -- the selector needed next.
+          // ===== STAGE 2: STORE SELECTION (trace 848657) =====
+          // The store list is VIRTUALIZED (~56 of 113 rendered, distance-sorted) and
+          // McKinley sits ~7.9mi down -- NOT in the top results -- so a plain
+          // text=/mckinley/ wait is unreliable. Robustness win: FILTER the list via
+          // input#store-search-input, then click the store ROW.
           await dumpDom(
             page,
             'STORE SELECT AFTER ADDRESS',
             [
-              { name: 'store-selector container', selector: 'app-store-selector, [role="dialog"].weg-modal-outer' },
-              { name: 'store cards/options', selector: '[role="listitem"], [role="option"], li, [data-testid*="store" i], [class*="store" i]' },
-              { name: 'McKinley present', selector: 'text=/mckinley/i' },
-              { name: 'McKinley (button/option/link/labelled)', selector: 'button:has-text("McKinley"), [role="option"]:has-text("McKinley"), a:has-text("McKinley"), [aria-label*="McKinley" i]' },
-              { name: 'select-store CTA', selector: 'button:has-text("Select"), button:has-text("Choose"), button:has-text("Order")' },
+              { name: 'store-selector container', selector: 'app-store-selector, .store-list' },
+              { name: 'store filter input', selector: 'input#store-search-input' },
+              { name: 'store rows (app-wegmans-store)', selector: 'app-wegmans-store' },
+              { name: 'store-list header (count)', selector: '.store-list-header' },
             ],
             'app-store-selector, [role="dialog"].weg-modal-outer, app-modal-form, main',
           );
+
+          // STAGE 2a: filter the 113-store list down to McKinley (avoids the
+          // virtualized-scroll problem). VERIFIED id; placeholder/role fallback.
+          const storeFilter = page
+            .locator('input#store-search-input')
+            .or(page.locator('app-store-selector input[type="text"], app-store-selector input'))
+            .first();
+          try {
+            if (await storeFilter.isVisible({ timeout: 8000 })) {
+              await storeFilter.click({ timeout: 4000 });
+              await storeFilter.fill('Mckinley');
+              await page.waitForTimeout(2000); // bounded settle for the filtered list
+            }
+          } catch {
+            /* best-effort -- if the filter input shape changed, the row match below still tries */
+          }
+
+          // STAGE 2b: click the McKinley store ROW. The clickable is
+          // button.wegmans-store-container (VERIFIED) -- NOT the title span and NOT
+          // .store-info > button.info-button. Primary: scope by the exact store-title;
+          // fallback: any app-wegmans-store containing /mckinley/i -> its container button.
+          const mckinleyStore = page
+            .locator('app-wegmans-store:has(span.store-title:text-is("Mckinley")) button.wegmans-store-container')
+            .or(
+              page
+                .locator('app-wegmans-store')
+                .filter({ hasText: /mckinley/i })
+                .locator('button.wegmans-store-container'),
+            )
+            .first();
+          await expect(
+            mckinleyStore,
+            'GATE-B: McKinley store row (button.wegmans-store-container) not found after filtering -- read "STORE SELECT AFTER ADDRESS".',
+          ).toBeVisible({ timeout: 15000 });
+          await mckinleyStore.click({ timeout: 5000 });
+
+          // Bounded wait for the selection to take effect (modal closes onto the menu).
+          await page
+            .locator('app-store-selector')
+            .first()
+            .waitFor({ state: 'hidden', timeout: 15000 })
+            .catch(() => {
+              /* selecting may require a confirm step -- the dump below reveals it */
+            });
+          await page.waitForTimeout(1500); // bounded settle after store-select
+
+          // RECON DUMP [AFTER STORE SELECT] -- what does selecting a store DO? (close the
+          // modal + land on the menu? require a confirm?) This drives the next iteration.
+          await dumpDom(
+            page,
+            'AFTER STORE SELECT',
+            [
+              { name: 'store modal still open', selector: 'app-store-selector, [role="dialog"].weg-modal-outer' },
+              { name: 'header switcher (Menu for ...)', selector: '#main-header-fulfillment-info, button.change-store-button' },
+              { name: 'header shows Mckinley', selector: '#main-header-fulfillment-info:has-text("Mckinley"), button.change-store-button:has-text("Mckinley")' },
+              { name: 'confirm CTA', selector: 'button:has-text("Confirm"), button:has-text("Continue"), button:has-text("Start")' },
+              { name: 'menu surface', selector: 'nav, [role="tablist"], main' },
+            ],
+            'header, [role="banner"], app-store-selector, [role="dialog"].weg-modal-outer, main',
+          );
         }
       } catch {
-        /* best-effort -- the two-stage selection shape is still being captured */
+        /* best-effort -- the store-select shape is still being captured */
       }
       await dismissInterstitials(page); // safe: scoped away from the flow modal
 
-      // CAPABILITY (recon-only): the STORE-SELECTION screen advanced -- McKinley text OR
-      // a store list became visible (the address autocomplete is gone). We do NOT assert
-      // McKinley-SELECTED success this iteration; that selector comes from the dump above.
-      const storeSelectSignal = page
-        .getByText(/mckinley/i)
-        .or(page.locator('app-store-selector [role="listitem"], app-store-selector [role="option"], app-store-selector [class*="store" i]'))
-        .or(page.locator('[role="dialog"].weg-modal-outer [role="listitem"]'))
+      // CAPABILITY: a store context is established -- the header switcher updated to a
+      // "Menu for <store>" state (prefer Mckinley) and/or the store modal closed onto
+      // the menu. We assert capability (we left the modal onto a menu), not exact
+      // content; the [AFTER STORE SELECT] dump confirms McKinley specifically.
+      const storeContextSignal = page
+        .locator('#main-header-fulfillment-info, button.change-store-button')
+        .filter({ hasText: /mckinley/i })
+        .or(page.getByRole('button', { name: /menu for /i }))
+        .or(page.locator('#main-header-fulfillment-info, button.change-store-button'))
         .first();
       await expect(
-        storeSelectSignal,
-        'GATE-B: store-selection screen did not advance after picking the address (no store list / McKinley) -- read "STORE SELECT AFTER ADDRESS".',
+        storeContextSignal,
+        'GATE-B: store not selected -- no "Menu for <store>" header after clicking McKinley -- read "AFTER STORE SELECT".',
       ).toBeVisible({ timeout: 20000 });
     });
 
     // ---- STEP c: takeout menu -> Pizza category -----------------------------------
     await step('navigate takeout menu -> Pizza', async () => {
       await dismissInterstitials(page);
+
+      // RECON DUMP [MENU AFTER STORE] -- with the McKinley store now selected, capture
+      // the real menu landing so the menu->Pizza nav can be written from ground truth
+      // if the guesses below miss (these steps were unreachable until store-select).
+      await dumpDom(
+        page,
+        'MENU AFTER STORE',
+        [
+          { name: 'header switcher (Menu for ...)', selector: '#main-header-fulfillment-info, button.change-store-button' },
+          { name: 'category nav', selector: 'nav a, [role="tablist"] [role="tab"], [data-testid*="categor" i]' },
+          { name: 'Pizza category', selector: 'text=/pizza/i' },
+          { name: 'menu item cards', selector: '[data-testid*="product" i], [data-testid*="item" i], article, li' },
+        ],
+        'header, [role="banner"], nav, [role="tablist"], main',
+      );
 
       // Prefer DIRECT-URL navigation to a known menu route to dodge any search/auto-
       // complete hijack (the ginger -> "waterloo" lesson). Route is UNVERIFIED -- the
