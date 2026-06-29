@@ -510,7 +510,93 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         addToCart,
         'GATE-E: add-to-cart control (button.cart-button) not visible -- read the "e:before-add" dump.',
       ).toBeVisible({ timeout: 20000 });
-      await addToCart.click({ timeout: 5000 });
+      // ===== ACTIONABILITY RECON (trace 848783) =====
+      // The selector is CORRECT and the button is visible+enabled, yet the click never
+      // registers (Playwright retries "visible, enabled, stable" until the GATE-E assert
+      // times out) -- a sticky-footer actionability failure, not a selector/option gate.
+      // INSTRUMENT FIRST: dump the button's geometry + what sits at its center point, then
+      // try escalating click strategies and LOG which one lands, so the trace names the fix.
+
+      // 1. [PRE-CLICK CART-BUTTON STATE] -- geometry, center-point occupant, disabled,
+      //    scrollable ancestor, in-viewport. Recon aid; never throws the flow.
+      try {
+        const preClick = await addToCart.evaluate((el) => {
+          const describe = (n: Element | null): string => {
+            if (!n) return 'null';
+            const cls =
+              typeof (n as HTMLElement).className === 'string' && (n as HTMLElement).className.trim()
+                ? '.' + (n as HTMLElement).className.trim().split(/\s+/).join('.')
+                : '';
+            return `${n.tagName.toLowerCase()}${n.id ? '#' + n.id : ''}${cls}`;
+          };
+          const r = el.getBoundingClientRect();
+          const cx = Math.round(r.left + r.width / 2);
+          const cy = Math.round(r.top + r.height / 2);
+          const atPoint = document.elementFromPoint(cx, cy);
+          const btn = el as HTMLButtonElement;
+          let scrollableAncestor: string | null = null;
+          let p: Element | null = el.parentElement;
+          while (p) {
+            const s = getComputedStyle(p);
+            if (/(auto|scroll)/.test(s.overflowY) && p.scrollHeight > p.clientHeight + 1) {
+              scrollableAncestor = describe(p);
+              break;
+            }
+            p = p.parentElement;
+          }
+          const cs = getComputedStyle(el);
+          return {
+            rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), bottom: Math.round(r.bottom) },
+            center: { cx, cy },
+            elementAtCenter: describe(atPoint),
+            atCenterIsButton: atPoint === el || el.contains(atPoint) || (!!atPoint && atPoint.closest?.('button.cart-button') === el),
+            disabled: btn.disabled,
+            ariaDisabled: el.getAttribute('aria-disabled'),
+            pointerEvents: cs.pointerEvents,
+            visibility: cs.visibility,
+            opacity: cs.opacity,
+            position: cs.position,
+            scrollableAncestor,
+            viewport: { w: window.innerWidth, h: window.innerHeight },
+            fullyInViewport: r.top >= 0 && r.bottom <= window.innerHeight,
+          };
+        });
+        console.log(
+          `\n===== PRE-CLICK CART-BUTTON STATE =====\n${JSON.stringify(preClick, null, 2)}\n===== END PRE-CLICK CART-BUTTON STATE =====\n`,
+        );
+      } catch (e) {
+        console.log(`[PRE-CLICK CART-BUTTON STATE] probe error (non-fatal): ${(e as Error).message}`);
+      }
+
+      // 2. Escalating click strategies -- stop at the first that does not throw, LOG which.
+      //    a) scrollIntoViewIfNeeded + normal click (actionability-checked)
+      //    b) force click (bypasses actionability -- if THIS lands, it was interception)
+      //    c) dispatchEvent('click') on the handle (DOM-level -- bypasses pointer hit-test)
+      let clickStrategy = 'none';
+      let clickErrors = '';
+      try {
+        await addToCart.scrollIntoViewIfNeeded({ timeout: 5000 });
+        await addToCart.click({ timeout: 5000 });
+        clickStrategy = 'a:scrollIntoView+click';
+      } catch (ea) {
+        clickErrors += `a=${(ea as Error).message.split('\n')[0]}`;
+        try {
+          await addToCart.click({ force: true, timeout: 5000 });
+          clickStrategy = 'b:force-click';
+        } catch (eb) {
+          clickErrors += ` | b=${(eb as Error).message.split('\n')[0]}`;
+          try {
+            await addToCart.dispatchEvent('click');
+            clickStrategy = 'c:dispatchEvent';
+          } catch (ec) {
+            clickStrategy = 'all-failed';
+            clickErrors += ` | c=${(ec as Error).message.split('\n')[0]}`;
+          }
+        }
+      }
+      console.log(
+        `\n===== CLICK STRATEGY ===== ${clickStrategy}${clickErrors ? `\n  errors: ${clickErrors}` : ''}\n===== END CLICK STRATEGY =====\n`,
+      );
 
       // Bounded wait for the add to take effect (the detail pane typically closes).
       await page
