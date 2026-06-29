@@ -477,13 +477,17 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
     await step('open a cheese pizza item', async () => {
       await dismissInterstitials(page);
 
-      // d.1 -- select the THIN CRUST PIZZA sub-cuisine tab FIRST. VERIFIED id from the
-      // census; text/role fallbacks. Best-effort + logged: a menu restructure must not
-      // hard-break (we continue and the d0 dump shows what happened).
+      // d.1 -- select the THIN CRUST PIZZA sub-cuisine tab FIRST.
+      // DUPLICATE-ID (census, trace 849177): button#cuisine-thin-crust-pizza resolves to
+      // TWO elements (the sub-cuisine nav is rendered twice -- e.g. a sticky/mobile +
+      // desktop copy). The prior .first() landed on a HIDDEN duplicate, isVisible() was
+      // false, and the click was skipped -> stayed on the default Promo tab. Disambiguate
+      // by filtering to VISIBLE *before* .first() so we get the one active tab.
       const thinCrustTab = page
         .locator('button#cuisine-thin-crust-pizza')
         .or(page.getByRole('tab', { name: /thin crust pizza/i }))
         .or(page.getByRole('button', { name: /thin crust pizza/i }))
+        .filter({ visible: true })
         .first();
       let tabClicked = false;
       try {
@@ -496,9 +500,25 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         /* best-effort -- menu may be restructured; the d0 dump reveals the truth */
       }
       await dismissInterstitials(page);
+
+      // Post-click selected-state probe (recon; non-throwing): did the tab actually
+      // switch? Check any #cuisine-thin-crust-pizza copy for an active/selected marker.
+      let tabSelected: boolean | null = null;
+      try {
+        tabSelected = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('button#cuisine-thin-crust-pizza')).some(
+            (e) =>
+              e.getAttribute('aria-selected') === 'true' ||
+              e.getAttribute('aria-current') === 'true' ||
+              /(^|\s)(active|selected)(\s|$)/i.test(e.className),
+          ),
+        );
+      } catch {
+        tabSelected = null;
+      }
       await relayToTrace(
         page,
-        `[d0:thin-crust-tab] thin-crust sub-cuisine tab found+clicked: ${tabClicked}`,
+        `[d0:thin-crust-tab] thin-crust sub-cuisine tab found+clicked: ${tabClicked} | selected(after): ${tabSelected}`,
       );
 
       // d.2 -- RECON DUMP [d0:thin-crust-listing]: confirm the tab-select worked and show
