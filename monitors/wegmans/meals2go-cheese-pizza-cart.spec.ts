@@ -589,6 +589,74 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         'app-pop-open-pane, [role="dialog"], main',
       );
 
+      // ===== STEP-D CART-BUTTON VISIBILITY PROBE (trace 849299) -- INSTRUMENT ONLY, NO FIX =====
+      // d0b proved button.cart-button EXISTS (count=1), yet the 602 assertion below times
+      // out at 20s -- existence != visibility, and the trace has 65 'item-loading' markers
+      // (async hydration). MEASURE the unmeasured fact: is the cart button visible / hidden
+      // / zero-size right now, and does it BECOME visible within ~10s (hydration delay) or
+      // stay hidden (a real site behavior to handle)?
+      const measureCartBtn = () =>
+        page.evaluate(() => {
+          const els = Array.from(
+            document.querySelectorAll('app-pop-open-pane button.cart-button, button.cart-button'),
+          );
+          return {
+            count: els.length,
+            items: els.map((el) => {
+              const r = el.getBoundingClientRect();
+              const cs = getComputedStyle(el);
+              return {
+                rect: { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), bottom: Math.round(r.bottom) },
+                display: cs.display,
+                visibility: cs.visibility,
+                opacity: cs.opacity,
+                offsetParentNotNull: (el as HTMLElement).offsetParent !== null,
+                disabled: (el as HTMLButtonElement).disabled,
+                ariaDisabled: el.getAttribute('aria-disabled'),
+                // box-and-style "visible" heuristic (independent of Playwright's check below)
+                looksVisible:
+                  r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0,
+              };
+            }),
+            itemLoadingCount: document.querySelectorAll('.item-loading, [class*="item-loading" i]').length,
+          };
+        });
+
+      try {
+        const atD0b = await measureCartBtn();
+        await relayToTrace(
+          page,
+          `\n===== STEP-D CART-BUTTON VISIBILITY @d0b =====\n${JSON.stringify(atD0b, null, 2)}\n===== END STEP-D CART-BUTTON VISIBILITY @d0b =====\n`,
+        );
+      } catch (e) {
+        await relayToTrace(page, `[STEP-D CART-BUTTON VISIBILITY @d0b] probe error (non-fatal): ${(e as Error).message}`);
+      }
+
+      // Bounded ~10s poll using Playwright's OWN visibility check (what toBeVisible uses):
+      // does the cart button become visible, and when?
+      let becameVisibleAtMs: number | null = null;
+      const cartBtnLoc = page.locator('app-pop-open-pane button.cart-button, button.cart-button').first();
+      for (let i = 0; i < 20; i++) {
+        if (await cartBtnLoc.isVisible().catch(() => false)) {
+          becameVisibleAtMs = i * 500;
+          break;
+        }
+        await page.waitForTimeout(500);
+      }
+      await relayToTrace(
+        page,
+        `[STEP-D CART-BUTTON VISIBILITY poll] becameVisibleWithin10s=${becameVisibleAtMs !== null} at=${becameVisibleAtMs}ms`,
+      );
+      try {
+        const atFinal = await measureCartBtn();
+        await relayToTrace(
+          page,
+          `\n===== STEP-D CART-BUTTON VISIBILITY @final =====\n${JSON.stringify(atFinal, null, 2)}\n===== END STEP-D CART-BUTTON VISIBILITY @final =====\n`,
+        );
+      } catch (e) {
+        await relayToTrace(page, `[STEP-D CART-BUTTON VISIBILITY @final] probe error (non-fatal): ${(e as Error).message}`);
+      }
+
       // CAPABILITY: the item DETAIL / customization view loaded -- an add-to-cart
       // control OR a customization (size/crust/options) region is present. DOM-signal
       // based, NOT a URL assertion (SPA nav; the route is unknown + may not change).
