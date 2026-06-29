@@ -547,114 +547,36 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         )
         .first();
       let cheesePizza = cheeseLink;
-      let cheeseKind = 'link';
       if (!(await cheeseLink.count().catch(() => 0))) {
-        if (await cheeseButton.count().catch(() => 0)) {
-          cheesePizza = cheeseButton;
-          cheeseKind = 'button';
-        } else {
-          cheesePizza = cheeseCard;
-          cheeseKind = 'card';
-        }
+        cheesePizza = (await cheeseButton.count().catch(() => 0)) ? cheeseButton : cheeseCard;
       }
       await expect(
         cheesePizza,
         'STEP d: no clickable cheese pizza under the thin-crust listing -- read the "d0:thin-crust-listing" dump.',
       ).toBeVisible({ timeout: 20000 });
 
-      // ===== STEP-D CLICK RECON (trace 849232) -- INSTRUMENT ONLY, NO FIX =====
-      // The action log shows cheesePizza.click() RETRIES 12x while app-pop-open-pane is
-      // ALREADY present -- the click seems to open the pane but never "succeeds" per
-      // Playwright. Capture WHY: what the locator resolved to, whether it detaches, and
-      // whether the pane opens DESPITE the click timing out.
-
-      // Grab a handle + pre-click geometry BEFORE the click (listing card still rendered).
-      let clickCenter: { cx: number; cy: number } | null = null;
-      let preHandle: import('@playwright/test').ElementHandle<Element> | null = null;
-      try {
-        preHandle = (await cheesePizza.elementHandle({ timeout: 5000 })) as
-          | import('@playwright/test').ElementHandle<Element>
-          | null;
-      } catch {
-        preHandle = null;
-      }
-      try {
-        const pre = await cheesePizza.evaluate(
-          (el) => {
-            const r = el.getBoundingClientRect();
-            return {
-              tag: el.tagName.toLowerCase(),
-              id: (el as HTMLElement).id || null,
-              outerHTML: (el as Element).outerHTML.slice(0, 300),
-              rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
-              cx: Math.round(r.left + r.width / 2),
-              cy: Math.round(r.top + r.height / 2),
-            };
-          },
-          undefined,
-          { timeout: 5000 },
-        );
-        clickCenter = { cx: pre.cx, cy: pre.cy };
-        await relayToTrace(
-          page,
-          `\n===== STEP-D PRE-CLICK [kind=${cheeseKind}] =====\n${JSON.stringify(pre, null, 2)}\n===== END STEP-D PRE-CLICK =====\n`,
-        );
-      } catch (e) {
-        await relayToTrace(page, `[STEP-D PRE-CLICK] probe error (non-fatal): ${(e as Error).message}`);
-      }
-
-      // Issue the click NON-FATALLY (short timeout). We EXPECT it may retry/timeout; the
-      // point is to observe whether the pane opens anyway.
-      let clickOutcome = 'ok';
-      try {
-        await cheesePizza.click({ timeout: 5000 });
-      } catch (e) {
-        clickOutcome = `failed: ${(e as Error).message.split('\n')[0]}`;
-      }
-
-      // Poll ~2s: does app-pop-open-pane appear after the click was issued?
-      let paneAppearedAfterMs: number | null = null;
-      for (let i = 0; i < 8; i++) {
-        if ((await page.locator('app-pop-open-pane').count().catch(() => 0)) > 0) {
-          paneAppearedAfterMs = i * 250;
-          break;
-        }
-        await page.waitForTimeout(250);
-      }
-
-      // Is the clicked card still attached, or did it detach when the pane opened?
-      let stillAttached: boolean | null = null;
-      if (preHandle) {
-        stillAttached = await preHandle.evaluate((n) => (n as Node).isConnected).catch(() => null);
-      }
-
-      // elementFromPoint at the click center: is the cheese card still there, or does the
-      // pane/an overlay now cover it (which would explain the retry)?
-      let atClickCenter: string | null = null;
-      if (clickCenter) {
-        try {
-          atClickCenter = await page.evaluate(({ cx, cy }) => {
-            const n = document.elementFromPoint(cx, cy);
-            if (!n) return 'null';
-            const cls =
-              typeof (n as HTMLElement).className === 'string' && (n as HTMLElement).className.trim()
-                ? '.' + (n as HTMLElement).className.trim().split(/\s+/).join('.')
-                : '';
-            return `${n.tagName.toLowerCase()}${(n as HTMLElement).id ? '#' + (n as HTMLElement).id : ''}${cls} | inPane=${!!n.closest('app-pop-open-pane')}`;
-          }, clickCenter);
-        } catch (e) {
-          atClickCenter = `error: ${(e as Error).message}`;
-        }
-      }
-      await relayToTrace(
-        page,
-        `[STEP-D POST-CLICK] clickOutcome=${clickOutcome} | paneAppearedAfterMs=${paneAppearedAfterMs} | clickedCardStillAttached=${stillAttached} | atClickCenter=${atClickCenter}`,
-      );
-      await preHandle?.dispose().catch(() => {});
+      // ===== STEP-D CLICK -> WAIT FOR PANE (trace 849266) =====
+      // DECISIVE recon (#21): the click WORKS and the detail pane opens INSTANTLY
+      // (clickOutcome=ok, paneAppearedAfterMs=0, clickedCardStillAttached=true, and d0b
+      // showed app-pop-open-pane=1 / h1.item-name=1 / button.cart-button=1). The earlier
+      // "retrying click action / 20s timeout" was Playwright re-attempting a click whose
+      // effect (pane open) had ALREADY landed, against a card transitioning through
+      // div.item-loading. FIX: issue the click WITHOUT blocking on its post-actionability
+      // settle, then gate on the PANE appearing -- pane-open is the success signal, not
+      // click-resolution.
+      await cheesePizza.click({ timeout: 5000, noWaitAfter: true }).catch(() => {
+        /* a click-settle retry/timeout is NOT a failure here -- the click's effect lands
+           instantly (849266) and the pane-open gate below is the real success signal */
+      });
       await dismissInterstitials(page);
 
-      // [d0b:after-click] -- did the pane open DESPITE the click 'failing'? (Names the fix
-      // next iteration: 'click already works, retry/timeout is the bug' vs 'wrong element'.)
+      // SUCCESS GATE: the detail pane opened (h1.item-name or the cart button is present).
+      await expect(
+        page.locator('app-pop-open-pane h1.item-name, app-pop-open-pane button.cart-button').first(),
+        'STEP d: detail pane did not open after clicking the cheese item -- read the "d0b:after-click" dump.',
+      ).toBeVisible({ timeout: 20000 });
+
+      // [d0b:after-click] -- confirm the pane contents (cheap, captured, useful).
       await dumpDom(
         page,
         'd0b:after-click',
