@@ -1,4 +1,4 @@
-import { test, expect, step, assertLoaded, dismissInterstitials } from '../../lib/flow';
+import { test, expect, step, dismissInterstitials } from '../../lib/flow';
 
 /**
  * Monitor: wegmans-search-product
@@ -60,18 +60,35 @@ test('Wegmans: search -> ginger sparkling water product', async ({ page }) => {
     await product.click();
   });
 
-  await step('assert product page loaded', async () => {
+  await step('assert the product quick-view opened', async () => {
     await dismissInterstitials(page);
-    // Wegmans renders the product detail on the /shop/search?query=… URL (SPA — no /product/
-    // route; verified from run #844486's trace). Assert the product DETAIL via DOM signals: a
-    // ginger-sparkling product title + the "Add to List" CTA — resilient to which exact product,
-    // price, or copy (no specific name / URL / price).
-    await assertLoaded(page, {
-      visibleText: /ginger.*sparkling/i,
-      timeoutMs: 15000,
-    });
+    // ★ SCOPE TO THE OPENED QUICK-VIEW, not the page-wide results state. Clicking a result
+    // opens a NATIVE <dialog class="component--product-details-dialog"> (implicit ARIA dialog
+    // role — a `[role="dialog"]` CSS attribute selector does NOT match a native <dialog>;
+    // getByRole('dialog') does, but only while it's OPEN). The results CARDS already carry
+    // /ginger.*sparkling/ text (19×) AND visible "Add to List" buttons (11×), so the old
+    // page-wide assertion was a FALSE POSITIVE — it passed even when the click no-opped and
+    // no detail opened. Scoping every signal to the detail container fixes that: the container
+    // is absent on the bare results page (verified live), so these hold ONLY when the product
+    // quick-view is actually open.
+    const productDetail = page
+      .locator('dialog.component--product-details-dialog')
+      .or(page.locator('.component--product-details'))
+      .or(page.getByRole('dialog'))
+      .first();
     await expect(
-      page.getByRole('button', { name: /add .*to list/i }).first(),
+      productDetail,
+      'product quick-view did not open after clicking the result — the click no-opped (no detail dialog).',
+    ).toBeVisible({ timeout: 15000 });
+    // Detail-only signals, SCOPED to the opened dialog (NOT page-wide): the product title and
+    // the "Add to List" CTA inside the detail. Both fail if the dialog never opened.
+    await expect(
+      productDetail.getByText(/ginger.*sparkling/i).first(),
+      'opened quick-view does not show the ginger-sparkling product title.',
+    ).toBeVisible({ timeout: 15000 });
+    await expect(
+      productDetail.getByRole('button', { name: /add .*to list/i }).first(),
+      'opened quick-view does not show the product-detail "Add to List" CTA.',
     ).toBeVisible({ timeout: 15000 });
   });
 });
