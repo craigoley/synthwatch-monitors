@@ -85,112 +85,158 @@ async function dumpDom(
 
 test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }) => {
   try {
-    // ---- STEP a: homepage renders -------------------------------------------------
-    await step('open meals2go.com homepage', async () => {
-      // UNVERIFIED host. Manifest target is www.meals2go.com; correct here + in the
-      // manifest together if the real host differs (trace will show the redirect).
+    // ---- STEP a: landing renders --------------------------------------------------
+    // GROUND TRUTH (trace 847963): meals2go.com loads a LANDING page whose primary CTA
+    // is button#landing-page-start-order-button ("Start an Order"). The site does NOT
+    // force store selection -- it loads with a DEFAULT store and renders the menu. Do
+    // NOT assume a clean store.
+    await step('open meals2go.com landing', async () => {
       await page.goto('https://www.meals2go.com', { waitUntil: 'domcontentloaded' });
       await dismissInterstitials(page);
 
-      // CAPABILITY (not specific copy): SOME top-level nav/header/logo rendered.
-      // Resilient to marketing-copy churn -- we only prove "the app shell is up".
+      // CAPABILITY: the landing rendered -- the VERIFIED "Start an Order" CTA OR the
+      // VERIFIED header store switcher is present (a returning session may skip the
+      // landing and drop straight onto the menu with its switcher in the header).
+      const startOrder = page.locator('button#landing-page-start-order-button');
+      const storeSwitcher = page
+        .locator('#main-header-fulfillment-info, button.change-store-button')
+        .or(page.getByRole('button', { name: /menu for /i }));
       await expect(
-        page
-          .getByRole('navigation')
-          .or(page.getByRole('banner'))
-          .or(page.locator('header'))
-          .first(),
+        startOrder.or(storeSwitcher).first(),
+        'STEP a: neither the "Start an Order" CTA nor the header store switcher rendered -- read the "a:landing" dump.',
       ).toBeVisible({ timeout: 20000 });
 
-      // DUMP: top-level nav + any order/start/location CTAs -- shows the entry points.
+      // DUMP: entry points on the landing -- start-order CTA + the header switcher.
       await dumpDom(
         page,
-        'a:homepage',
+        'a:landing',
         [
+          { name: 'start-order button (id)', selector: 'button#landing-page-start-order-button' },
+          { name: 'store switcher (id/class)', selector: '#main-header-fulfillment-info, button.change-store-button' },
+          { name: 'menu-for store label', selector: 'text=/menu for /i' },
           { name: 'nav', selector: 'nav, [role="navigation"]' },
           { name: 'header/banner', selector: 'header, [role="banner"]' },
-          { name: 'order/start CTA', selector: 'a, button' },
-          { name: 'order-text CTA', selector: 'text=/order|start|get started/i' },
-          { name: 'location CTA', selector: 'text=/location|store|pickup|carry ?out|delivery/i' },
         ],
-        'header, [role="banner"], nav',
+        'header, [role="banner"], nav, body',
       );
     });
 
-    // ---- STEP b: fulfillment = CARRY OUT, Buffalo NY, McKinley store ---------------
-    // GATE-B -- HIGHEST UNKNOWN. Store-selection UX is entirely unguessed. The bolded
-    // open question: does meals2go GATE the menu behind store/fulfillment selection?
-    // We attempt fulfillment FIRST so the menu (step c) is in a store context. Every
-    // sub-locator here is a guess; the DUMPS are heaviest at this gate.
-    await step('establish fulfillment: CARRY OUT -> Buffalo, NY -> McKinley', async () => {
+    // ---- STEP b: GATE-B store/fulfillment switcher recon ---------------------------
+    // GATE-B -- the prior run failed here: it clicked a landing carry-out element that
+    // navigated INTO the menu on the DEFAULT store, then waited for /mckinley/ or
+    // /change store/ text that NEVER appears (the real header reads "Menu for <City>"
+    // via .change-store-button). This iteration's PURPOSE is recon: OPEN the switcher
+    // and DUMP its internals (the carry-out / Buffalo / McKinley panel we have not yet
+    // captured), then stop. We capability-assert ONLY that the switcher opened -- we do
+    // NOT yet know the McKinley-selected selectors, so we do not assert success.
+    await step('GATE-B: open the store/fulfillment switcher (recon)', async () => {
       await dismissInterstitials(page);
 
-      // DUMP up front: whatever fulfillment surface exists on/after load.
-      await dumpDom(
-        page,
-        'b:fulfillment-entry',
-        [
-          { name: 'carry out toggle', selector: 'text=/carry ?out|pick ?up|takeout/i' },
-          { name: 'delivery toggle', selector: 'text=/delivery/i' },
-          { name: 'change/select store', selector: 'text=/change store|select (a )?store|choose store|find a store/i' },
-          { name: 'address/store search input', selector: 'input[type="search"], input[type="text"], input[placeholder]' },
-          { name: 'dialog/modal', selector: '[role="dialog"], dialog' },
-        ],
-        'body',
-      );
-
-      // Open the fulfillment surface if there's an explicit entry CTA (best-effort).
-      const openFulfillment = page
-        .getByRole('button', { name: /carry ?out|pick ?up|change store|select (a )?store|find a store|set (your )?store/i })
-        .or(page.getByRole('link', { name: /carry ?out|pick ?up|change store|select (a )?store|find a store/i }))
-        .first();
+      // On the landing the header switcher isn't shown until "Start an Order". Click it
+      // first (best-effort -- a returning session may already render the menu+switcher).
+      const startOrder = page.locator('button#landing-page-start-order-button').first();
       try {
-        if (await openFulfillment.isVisible({ timeout: 8000 })) {
-          await openFulfillment.click({ timeout: 5000 });
+        if (await startOrder.isVisible({ timeout: 6000 })) {
+          await startOrder.click({ timeout: 5000 });
+          await dismissInterstitials(page);
         }
       } catch {
-        /* best-effort -- the surface may already be open */
+        /* best-effort -- may already be in the menu */
       }
+
+      // The store control reads "Menu for <City>" via .change-store-button inside
+      // #main-header-fulfillment-info. VERIFIED id/class from trace 847963; paired with
+      // a role/text fallback per selector discipline.
+      const switcherButton = page
+        .locator('#main-header-fulfillment-info, button.change-store-button')
+        .or(page.getByRole('button', { name: /menu for /i }))
+        .first();
+      await expect(
+        switcherButton,
+        'GATE-B: store switcher button (#main-header-fulfillment-info / .change-store-button / "Menu for ...") not found -- read the "b:switcher-button" dump.',
+      ).toBeVisible({ timeout: 20000 });
+
+      // DUMP the pre-open state -- shows the DEFAULT store the page loaded with.
+      await dumpDom(
+        page,
+        'b:switcher-button',
+        [
+          { name: 'switcher button', selector: '#main-header-fulfillment-info, button.change-store-button' },
+          { name: 'menu-for label', selector: 'text=/menu for /i' },
+          { name: 'location span', selector: 'span.location, .emphasis.location' },
+        ],
+        'header, [role="banner"]',
+      );
+
+      await switcherButton.click({ timeout: 5000 });
       await dismissInterstitials(page);
 
-      // Choose CARRY OUT / PICKUP (not delivery). Tab/button/radio shape unknown.
+      // Bounded wait for the switcher surface to open (NOT networkidle). The carry-out /
+      // Buffalo / McKinley UI opens here -- shape UNKNOWN, this dump is the whole point.
+      const switcherPanel = page
+        .getByRole('dialog')
+        .or(
+          page.locator(
+            'app-menu-preview-store-switcher, [role="dialog"], dialog, .modal, [class*="modal" i], [class*="store-switcher" i], [class*="fulfillment" i]',
+          ),
+        )
+        .first();
+      const searchInput = page
+        .getByRole('textbox')
+        .or(page.getByPlaceholder(/zip|city|store|search|address/i))
+        .first();
+      try {
+        await switcherPanel.or(searchInput).first().waitFor({ state: 'visible', timeout: 15000 });
+      } catch {
+        /* fall through to the dump -- it reveals whether anything opened */
+      }
+
+      // ===== STORE SWITCHER OPEN DOM ===== (this iteration's purpose). Heavy dump of
+      // the opened container + candidate counts for the carry-out/delivery toggle and
+      // the store-search input. Read this label first in the next trace.
+      await dumpDom(
+        page,
+        'STORE SWITCHER OPEN DOM',
+        [
+          { name: 'dialog/panel', selector: '[role="dialog"], dialog, app-menu-preview-store-switcher' },
+          { name: 'carry-out/pickup toggle (text)', selector: 'text=/carry ?out|pickup/i' },
+          { name: 'carry-out/pickup toggle (button/tab)', selector: 'button:has-text("Carry"), button:has-text("Pickup"), [role="tab"]:has-text("Carry"), [role="tab"]:has-text("Pickup")' },
+          { name: 'delivery toggle (text)', selector: 'text=/delivery/i' },
+          { name: 'store/location search input', selector: 'input[type="search"], input[type="text"], input[placeholder], [role="textbox"]' },
+        ],
+        'app-menu-preview-store-switcher, [role="dialog"], dialog, .modal, [class*="store-switcher" i], main, body',
+      );
+
+      // Best-effort: select CARRY OUT / PICKUP if a toggle is present (non-fatal -- it
+      // may already be the default). Recon only; we do not assert on it.
       const carryOut = page
         .getByRole('tab', { name: /carry ?out|pick ?up|takeout/i })
         .or(page.getByRole('button', { name: /carry ?out|pick ?up|takeout/i }))
         .or(page.getByRole('radio', { name: /carry ?out|pick ?up|takeout/i }))
         .first();
       try {
-        if (await carryOut.isVisible({ timeout: 8000 })) {
-          await carryOut.click({ timeout: 5000 });
+        if (await carryOut.isVisible({ timeout: 4000 })) {
+          await carryOut.click({ timeout: 4000 });
+          await dismissInterstitials(page);
         }
       } catch {
         /* best-effort -- carry-out may be the default */
       }
 
-      await dumpDom(
-        page,
-        'b:after-carryout-select',
-        [
-          { name: 'store search input', selector: 'input[type="search"], input[type="text"], input[placeholder]' },
-          { name: 'result list', selector: '[role="listbox"], [role="list"], ul li' },
-        ],
-        '[role="dialog"], dialog, main, body',
-      );
-
-      // Store search: type the locality, then narrow to McKinley. Input selector unknown;
-      // try search-typed inputs first, then any text input inside a dialog, then any.
+      // Drive as far as the store-search input: type "Buffalo", let results settle, then
+      // DUMP the result list + any McKinley result. We STOP here -- the dump tells us how
+      // to write the Buffalo/McKinley selectors next.
       const storeInput = page
         .getByRole('searchbox')
         .or(page.getByPlaceholder(/zip|city|address|store|location|search/i))
-        .or(page.locator('[role="dialog"] input, dialog input').first())
+        .or(page.locator('[role="dialog"] input, dialog input, app-menu-preview-store-switcher input').first())
         .or(page.locator('input[type="search"], input[type="text"]').first())
         .first();
       try {
-        if (await storeInput.isVisible({ timeout: 10000 })) {
-          await storeInput.click({ timeout: 5000 });
+        if (await storeInput.isVisible({ timeout: 8000 })) {
+          await storeInput.click({ timeout: 4000 });
           await storeInput.fill('Buffalo');
-          // Let any store-search autocomplete settle before narrowing (bounded wait,
-          // NOT networkidle on a heavy SPA).
+          // Bounded wait for store-search autocomplete to settle (NOT networkidle).
           await page.waitForTimeout(2500);
           await dumpDom(
             page,
@@ -199,55 +245,19 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
               { name: 'result items', selector: '[role="option"], [role="listitem"], li, [data-testid*="store" i]' },
               { name: 'McKinley result', selector: 'text=/mckinley/i' },
             ],
-            '[role="dialog"], dialog, [role="listbox"], main',
+            'app-menu-preview-store-switcher, [role="dialog"], dialog, [role="listbox"], main',
           );
-          // Narrow to McKinley (the specific store on Buffalo's McKinley Pkwy). If the
-          // input filters live, replacing the value narrows the list.
-          await storeInput.fill('McKinley');
-          await page.waitForTimeout(2500);
         }
       } catch {
-        /* best-effort -- store search may not be an input on first load */
+        /* best-effort -- the store-search input shape is still unverified */
       }
       await dismissInterstitials(page);
 
-      // Pick the McKinley result. ANY element/affordance mentioning McKinley, .first().
-      // (Never a store-id -- match by visible store name, resilient to id churn.)
-      const mckinley = page
-        .getByRole('option', { name: /mckinley/i })
-        .or(page.getByRole('button', { name: /mckinley/i }))
-        .or(page.getByRole('link', { name: /mckinley/i }))
-        .or(page.getByText(/mckinley/i))
-        .first();
-      try {
-        if (await mckinley.isVisible({ timeout: 12000 })) {
-          await mckinley.click({ timeout: 5000 });
-        }
-      } catch {
-        /* best-effort -- result shape unknown; the dump below reveals the truth */
-      }
-      await dismissInterstitials(page);
-
-      // Heavy DUMP of the final fulfillment state -- the single most important recon output.
-      await dumpDom(
-        page,
-        'b:fulfillment-final',
-        [
-          { name: 'store-selected signal (McKinley shown)', selector: 'text=/mckinley/i' },
-          { name: 'change-store affordance', selector: 'text=/change store|edit store|your store|store:/i' },
-          { name: 'carry-out confirmed', selector: 'text=/carry ?out|pick ?up/i' },
-        ],
-        'header, [role="banner"], [role="dialog"], main',
-      );
-
-      // CAPABILITY: a store-selected signal exists -- McKinley is named OR a "change
-      // store" affordance appeared (the modal closed onto a chosen store). UNVERIFIED:
-      // if this fails, the dump shows whether store-selection happened at all.
+      // CAPABILITY (recon-only): the switcher OPENED -- a dialog/panel OR a search input
+      // became visible. We do NOT assert McKinley-selected success this iteration.
       await expect(
-        page
-          .getByText(/mckinley/i)
-          .or(page.getByText(/change store|edit store|your store/i))
-          .first(),
+        switcherPanel.or(searchInput).first(),
+        'GATE-B: the store switcher did not open (no dialog/panel/search input after clicking the switcher) -- read the "STORE SWITCHER OPEN DOM" dump.',
       ).toBeVisible({ timeout: 20000 });
     });
 
