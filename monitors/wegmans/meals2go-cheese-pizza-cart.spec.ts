@@ -132,10 +132,11 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
     // flow-driven modals (see lib/flow.ts FLOW_MODAL_EXCLUDE_SELECTOR), which is what
     // makes this drive possible.
     //
-    // This iteration: open the modal, click CARRYOUT, and RECON-DUMP the next screen
-    // (the store-selection / Buffalo search + McKinley result) we have not captured
-    // yet. Capability-assert ONLY that the store-selection screen advanced.
-    await step('GATE-B: drive fulfillment modal -> Carryout (recon)', async () => {
+    // This iteration (trace 848634): store selection is TWO-STAGE. Open the modal ->
+    // CARRYOUT -> type "Buffalo" (a GOOGLE ADDRESS autocomplete, not a store list) ->
+    // PICK the "Buffalo, NY" address -> THEN the store-selection screen (McKinley)
+    // appears. RECON-DUMP that store screen; capability-assert ONLY that it advanced.
+    await step('GATE-B: Carryout -> pick address -> store-select (recon)', async () => {
       await dismissInterstitials(page); // safe now: skips the flow modal
 
       // a. Open the fulfillment modal via the VERIFIED landing CTA.
@@ -217,36 +218,97 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         '[role="dialog"].weg-modal-outer, app-modal-form, app-fulfillment-type-change, main',
       );
 
-      // If a search input is present, type "Buffalo" and dump the results so the next
-      // iteration can write the Buffalo/McKinley selectors. Do NOT assert McKinley yet.
+      // ===== TWO-STAGE STORE SELECTION (trace 848634) =====
+      // Typing into the search box does NOT hit a store list -- it hits a GOOGLE
+      // ADDRESS AUTOCOMPLETE (app-store-selector > app-google-search-results), with
+      // button.google-result rows (span.address-main-text "Buffalo" +
+      // span.address-secondary-text ", NY, USA"). You must PICK an address FIRST;
+      // only THEN does the store-selection screen (where McKinley lives) appear. The
+      // prior run searched for McKinley on the address screen -- wrong screen.
       try {
         if (await searchInput.isVisible({ timeout: 8000 })) {
+          // STAGE 1: type the locality -> address autocomplete.
           await searchInput.click({ timeout: 4000 });
           await searchInput.fill('Buffalo');
-          await page.waitForTimeout(2500); // bounded settle, NOT networkidle
+          await page.waitForTimeout(2500); // bounded settle for the address autocomplete
 
-          // e (recon). ===== RECON DUMP [STORE RESULTS AFTER BUFFALO] =====
+          // RECON DUMP [ADDRESS AUTOCOMPLETE AFTER BUFFALO] -- VERIFIED google-result
+          // shape from trace 848634; confirm the row selectors before picking.
           await dumpDom(
             page,
-            'STORE RESULTS AFTER BUFFALO',
+            'ADDRESS AUTOCOMPLETE AFTER BUFFALO',
             [
-              { name: 'result items', selector: '[role="option"], [role="listitem"], li, [data-testid*="store" i]' },
-              { name: 'McKinley result', selector: 'text=/mckinley/i' },
-              { name: 'McKinley (button/option/link)', selector: 'button:has-text("McKinley"), [role="option"]:has-text("McKinley"), a:has-text("McKinley"), [aria-label*="McKinley" i]' },
+              { name: 'autocomplete container', selector: 'app-google-search-results, .google-results-container' },
+              { name: 'google-result rows', selector: 'button.google-result' },
+              { name: 'address-main-text', selector: 'span.address-main-text' },
+              { name: 'Buffalo,NY row', selector: 'button.google-result:has-text("Buffalo")' },
             ],
-            '[role="dialog"].weg-modal-outer, app-modal-form, [role="listbox"], main',
+            'app-google-search-results, app-store-selector, [role="dialog"].weg-modal-outer, app-modal-form',
+          );
+
+          // STAGE 1 PICK: click the FIRST google-result whose address is "Buffalo, NY"
+          // (the top result). VERIFIED class; fall back to the first google-result if
+          // the text filter misses, then to any [role="listitem"] button.
+          const buffaloFiltered = page
+            .locator('button.google-result')
+            .filter({ hasText: /buffalo,?\s*ny/i })
+            .first();
+          const firstResult = page
+            .locator('button.google-result')
+            .first()
+            .or(page.locator('[role="listitem"] button, [role="option"]').first());
+          const buffaloAddress =
+            (await buffaloFiltered.count().catch(() => 0)) > 0 ? buffaloFiltered : firstResult;
+          await expect(
+            buffaloAddress,
+            'GATE-B: no "Buffalo, NY" address row (button.google-result) to pick -- read "ADDRESS AUTOCOMPLETE AFTER BUFFALO".',
+          ).toBeVisible({ timeout: 15000 });
+          await buffaloAddress.click({ timeout: 5000 });
+
+          // Assert the address was accepted: the autocomplete list disappears (we then
+          // confirm the store screen below). Bounded; never networkidle.
+          await page
+            .locator('app-google-search-results, .google-results-container')
+            .first()
+            .waitFor({ state: 'hidden', timeout: 12000 })
+            .catch(() => {
+              /* some flows replace the panel in place; the dump still reveals state */
+            });
+          await page.waitForTimeout(1500); // bounded settle for the store-selection screen
+
+          // STAGE 2 RECON DUMP [STORE SELECT AFTER ADDRESS] -- the store-selection
+          // screen (nearby stores; McKinley) we have NOT captured. If "McKinley"
+          // appears, this dump's region outerHTML carries its tag/id/role/aria-label/
+          // data-testid + clickable ancestor -- the selector needed next.
+          await dumpDom(
+            page,
+            'STORE SELECT AFTER ADDRESS',
+            [
+              { name: 'store-selector container', selector: 'app-store-selector, [role="dialog"].weg-modal-outer' },
+              { name: 'store cards/options', selector: '[role="listitem"], [role="option"], li, [data-testid*="store" i], [class*="store" i]' },
+              { name: 'McKinley present', selector: 'text=/mckinley/i' },
+              { name: 'McKinley (button/option/link/labelled)', selector: 'button:has-text("McKinley"), [role="option"]:has-text("McKinley"), a:has-text("McKinley"), [aria-label*="McKinley" i]' },
+              { name: 'select-store CTA', selector: 'button:has-text("Select"), button:has-text("Choose"), button:has-text("Order")' },
+            ],
+            'app-store-selector, [role="dialog"].weg-modal-outer, app-modal-form, main',
           );
         }
       } catch {
-        /* best-effort -- the store-search input shape is still being captured */
+        /* best-effort -- the two-stage selection shape is still being captured */
       }
+      await dismissInterstitials(page); // safe: scoped away from the flow modal
 
-      // e (assert). CAPABILITY (recon-only): the store-selection screen advanced -- a
-      // search input OR a store-result list became visible. We do NOT assert McKinley-
-      // selected success this iteration; that selector comes from the dumps above.
+      // CAPABILITY (recon-only): the STORE-SELECTION screen advanced -- McKinley text OR
+      // a store list became visible (the address autocomplete is gone). We do NOT assert
+      // McKinley-SELECTED success this iteration; that selector comes from the dump above.
+      const storeSelectSignal = page
+        .getByText(/mckinley/i)
+        .or(page.locator('app-store-selector [role="listitem"], app-store-selector [role="option"], app-store-selector [class*="store" i]'))
+        .or(page.locator('[role="dialog"].weg-modal-outer [role="listitem"]'))
+        .first();
       await expect(
-        searchInput.or(resultList).first(),
-        'GATE-B: store-selection screen did not advance after Carryout (no search input / result list) -- read "FULFILLMENT AFTER CARRYOUT".',
+        storeSelectSignal,
+        'GATE-B: store-selection screen did not advance after picking the address (no store list / McKinley) -- read "STORE SELECT AFTER ADDRESS".',
       ).toBeVisible({ timeout: 20000 });
     });
 
