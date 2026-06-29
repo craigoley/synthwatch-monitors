@@ -44,10 +44,34 @@ import { test, expect, step, assertLoaded, dismissInterstitials, type Page } fro
  */
 
 /**
+ * Emit a diagnostic line so it is CAPTURED IN THE TRACE.
+ *
+ * ★ Empirically verified (probe, run locally): spec-side (Node) console.log does
+ * NOT appear in the Playwright PAGE trace's console-event stream (0-trace.trace) --
+ * it lands only as a {type:"stdout"} event in the runner trace (test.trace), a
+ * different channel the SynthWatch runner does not surface as a "console event".
+ * That is why earlier PRE-CLICK / DOM-DUMP output never showed up even though the
+ * code ran (provenance has_preclick=true). PAGE-side console.log
+ * (page.evaluate(() => console.log(...))) DOES land in 0-trace.trace as a
+ * {type:"console"} event -- the same stream the runner counts. So we relay through
+ * the page's console. Best-effort + Node console.log too (local/stdout fallback).
+ */
+async function relayToTrace(page: Page, text: string): Promise<void> {
+  console.log(text); // local/stdout (CI + test.trace)
+  try {
+    // PAGE console -> captured in the Playwright page trace's console events.
+    await page.evaluate((m) => console.log(m), text);
+  } catch {
+    /* page may be closed/navigating -- the Node console.log above still emits */
+  }
+}
+
+/**
  * Labeled DOM dump. Recon aid only -- never throws, never fails the flow.
  * Emits, for a labeled gate: the current URL, the live count of each candidate
  * locator (so the trace shows which guesses matched), and a trimmed outerHTML
  * of a region so the real DOM is visible when every guess missed.
+ * Routed through relayToTrace so dumps actually land in the trace.
  */
 async function dumpDom(
   page: Page,
@@ -80,7 +104,7 @@ async function dumpDom(
     lines.push(`  region dump ERROR: ${(e as Error).message}`);
   }
   lines.push(`===== END DUMP [${label}] =====\n`);
-  console.log(lines.join('\n'));
+  await relayToTrace(page, lines.join('\n'));
 }
 
 test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }) => {
@@ -506,10 +530,73 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         .locator('app-pop-open-pane button.cart-button, button.cart-button')
         .or(page.getByRole('button', { name: /add to cart/i }))
         .first();
-      await expect(
-        addToCart,
-        'GATE-E: add-to-cart control (button.cart-button) not visible -- read the "e:before-add" dump.',
-      ).toBeVisible({ timeout: 20000 });
+
+      // ===== PRE-GATE TELEMETRY (run 849055) =====
+      // Previously the diagnostics ran AFTER the GATE-E toBeVisible -- which is the line
+      // that times out (the button is not resolving as visible to the locator within
+      // 20s), so the diagnostics never executed. Run the decisive census FIRST, then a
+      // SOFT visibility gate, so the trace finally carries the data regardless.
+
+      // [CART-BUTTON DOM CENSUS] -- enumerate what actually exists, BEFORE any wait.
+      // page.evaluate over querySelectorAll: never waits on visibility, never throws.
+      try {
+        const census = await page.evaluate(() => {
+          const detail = (el: Element) => {
+            const r = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            return {
+              text: (el.textContent || '').trim().slice(0, 60),
+              disabled: (el as HTMLButtonElement).disabled,
+              ariaDisabled: el.getAttribute('aria-disabled'),
+              rect: { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), bottom: Math.round(r.bottom) },
+              display: cs.display,
+              visibility: cs.visibility,
+              opacity: cs.opacity,
+              pointerEvents: cs.pointerEvents,
+              position: cs.position,
+              offsetParentNull: (el as HTMLElement).offsetParent === null,
+              inViewport: r.top >= 0 && r.bottom <= window.innerHeight && r.width > 0 && r.height > 0,
+            };
+          };
+          const accName = (el: Element) =>
+            (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim();
+          const reAdd = /add to (cart|order|bag)|add$/i;
+          const bare = Array.from(document.querySelectorAll('button.cart-button'));
+          const scoped = Array.from(document.querySelectorAll('app-pop-open-pane button.cart-button'));
+          const byName = Array.from(document.querySelectorAll('button')).filter((b) => reAdd.test(accName(b)));
+          const footer = document.querySelector(
+            'app-pop-open-pane div.bottom-action-buttons, app-pop-open-pane .bottom-action-buttons, div.bottom-action-buttons',
+          );
+          return {
+            paneCount: document.querySelectorAll('app-pop-open-pane').length,
+            'button.cart-button': { count: bare.length, items: bare.map(detail) },
+            'app-pop-open-pane button.cart-button': { count: scoped.length, items: scoped.map(detail) },
+            'buttons matching /add to.../i': {
+              count: byName.length,
+              items: byName.map((b) => ({ name: accName(b).slice(0, 60), ...detail(b) })),
+            },
+            footerSnippet: footer ? footer.outerHTML.slice(0, 300) : '(no bottom-action-buttons found)',
+          };
+        });
+        await relayToTrace(
+          page,
+          `\n===== CART-BUTTON DOM CENSUS =====\n${JSON.stringify(census, null, 2)}\n===== END CART-BUTTON DOM CENSUS =====\n`,
+        );
+      } catch (e) {
+        await relayToTrace(page, `[CART-BUTTON DOM CENSUS] census error (non-fatal): ${(e as Error).message}`);
+      }
+
+      // SOFT visibility gate: do NOT hard-fail here -- a timeout would skip everything
+      // below. Short timeout (8s, not 20s) -- the census already reports visibility.
+      let gateEVisible = false;
+      try {
+        await expect(addToCart).toBeVisible({ timeout: 8000 });
+        gateEVisible = true;
+      } catch {
+        gateEVisible = false;
+      }
+      await relayToTrace(page, `[GATE-E RESULT] add-to-cart button visible to locator within 8s: ${gateEVisible}`);
+
       // ===== ACTIONABILITY RECON (trace 848783) =====
       // The selector is CORRECT and the button is visible+enabled, yet the click never
       // registers (Playwright retries "visible, enabled, stable" until the GATE-E assert
@@ -560,12 +647,13 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
             viewport: { w: window.innerWidth, h: window.innerHeight },
             fullyInViewport: r.top >= 0 && r.bottom <= window.innerHeight,
           };
-        });
-        console.log(
+        }, undefined, { timeout: 5000 });
+        await relayToTrace(
+          page,
           `\n===== PRE-CLICK CART-BUTTON STATE =====\n${JSON.stringify(preClick, null, 2)}\n===== END PRE-CLICK CART-BUTTON STATE =====\n`,
         );
       } catch (e) {
-        console.log(`[PRE-CLICK CART-BUTTON STATE] probe error (non-fatal): ${(e as Error).message}`);
+        await relayToTrace(page, `[PRE-CLICK CART-BUTTON STATE] probe error (non-fatal): ${(e as Error).message}`);
       }
 
       // 2. Escalating click strategies -- stop at the first that does not throw, LOG which.
@@ -594,7 +682,8 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
           }
         }
       }
-      console.log(
+      await relayToTrace(
+        page,
         `\n===== CLICK STRATEGY ===== ${clickStrategy}${clickErrors ? `\n  errors: ${clickErrors}` : ''}\n===== END CLICK STRATEGY =====\n`,
       );
 
