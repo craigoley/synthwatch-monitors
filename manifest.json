@@ -32,9 +32,16 @@
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
       "tags": ["meals2go", "ecommerce", "cart", "carryout", "journey"],
-      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item, then self-clean by removing it. Cart-mutating + store-session bearing; enabledByDefault:false and ungated until the B10 trace-redaction rule lands.",
+      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item via the cart-items API, then self-clean by removing it. Cart-mutating + store-session bearing; enabledByDefault:false. B10-compliant (sensitive + redact_patterns) but NOT yet enabled (no check_locations row).",
       "target": "https://www.meals2go.com",
-      "enabledByDefault": false
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
+        "[Bb]earer\\s+[A-Za-z0-9._~+/-]+=*",
+        "(?:access_token|id_token|refresh_token|client_secret|sessiontoken)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9._~+/=-]+"
+      ]
     },
     {
       "id": "synthwatch-self-homepage",
