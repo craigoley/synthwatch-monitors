@@ -52,10 +52,49 @@ export async function assertLoaded(
 }
 
 /**
+ * Selector for FLOW-DRIVEN modals that a spec opens and drives itself (e.g. the
+ * meals2go fulfillment/store-selection modal). dismissInterstitials must NEVER
+ * click a button inside one of these or whose class marks it as that modal's
+ * close affordance -- doing so closes the very modal the flow needs and the flow
+ * falls through against an empty page (observed: meals2go trace 847996, where the
+ * generic /^close$/ matcher clicked .store-modal-close-button).
+ *
+ * This is intentionally SCOPED: cookie/newsletter/consent banners are NOT flow
+ * modals, so they are still dismissed. If a new spec drives its own modal, add
+ * its container/close-class here rather than loosening the dismiss matchers.
+ */
+const FLOW_MODAL_EXCLUDE_SELECTOR =
+  'app-fulfillment-type-change, app-modal-form, [role="dialog"].weg-modal-outer';
+const FLOW_MODAL_EXCLUDE_CLASSES = ['store-modal-close-button'];
+
+/** True if `el` belongs to a flow-driven modal the spec controls itself. */
+async function isInsideFlowModal(el: import('@playwright/test').Locator): Promise<boolean> {
+  try {
+    return await el.evaluate(
+      (node, { sel, classes }) => {
+        const e = node as Element;
+        if (e.closest(sel)) return true;
+        return classes.some((c) => e.classList.contains(c));
+      },
+      { sel: FLOW_MODAL_EXCLUDE_SELECTOR, classes: FLOW_MODAL_EXCLUDE_CLASSES },
+    );
+  } catch {
+    // If we can't introspect (detached, etc.), be conservative and do NOT skip:
+    // a missed flow modal is rare; not dismissing a real nuisance popup is worse.
+    return false;
+  }
+}
+
+/**
  * Dismiss the common interstitials production e-comm sites throw up (cookie
  * banners, location/store pickers, newsletter modals) that otherwise intercept
  * clicks. Best-effort: never fails the flow if a given interstitial isn't
  * present. Add site-specific dismissals here as flows discover them.
+ *
+ * IMPORTANT: skips any candidate inside a FLOW-DRIVEN modal (see
+ * FLOW_MODAL_EXCLUDE_SELECTOR) so it never closes a modal a spec is actively
+ * driving. Iterates real matches (not just .first()) so a flow-modal close
+ * button never shadows a genuine nuisance-popup button of the same name.
  */
 export async function dismissInterstitials(page: Page): Promise<void> {
   const candidates: Array<{ role: 'button'; name: RegExp }> = [
@@ -64,13 +103,25 @@ export async function dismissInterstitials(page: Page): Promise<void> {
     { role: 'button', name: /continue/i },
   ];
   for (const c of candidates) {
-    const el = page.getByRole(c.role, { name: c.name }).first();
+    const matches = page.getByRole(c.role, { name: c.name });
+    let count = 0;
     try {
-      if (await el.isVisible({ timeout: 1000 })) {
-        await el.click({ timeout: 2000 });
-      }
+      count = await matches.count();
     } catch {
-      // best-effort; ignore
+      continue;
+    }
+    for (let i = 0; i < count; i++) {
+      const el = matches.nth(i);
+      try {
+        if (!(await el.isVisible({ timeout: 1000 }))) continue;
+        // Never dismiss a button the active flow is driving (e.g. the meals2go
+        // fulfillment modal's close button) -- that would close it on the flow.
+        if (await isInsideFlowModal(el)) continue;
+        await el.click({ timeout: 2000 });
+        break; // one genuine dismissal per candidate is enough
+      } catch {
+        // best-effort; ignore
+      }
     }
   }
 }
