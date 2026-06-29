@@ -589,89 +589,16 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         'app-pop-open-pane, [role="dialog"], main',
       );
 
-      // ===== STEP-D CART-BUTTON VISIBILITY PROBE (trace 849299) -- INSTRUMENT ONLY, NO FIX =====
-      // d0b proved button.cart-button EXISTS (count=1), yet the 602 assertion below times
-      // out at 20s -- existence != visibility, and the trace has 65 'item-loading' markers
-      // (async hydration). MEASURE the unmeasured fact: is the cart button visible / hidden
-      // / zero-size right now, and does it BECOME visible within ~10s (hydration delay) or
-      // stay hidden (a real site behavior to handle)?
-      const measureCartBtn = () =>
-        page.evaluate(() => {
-          const els = Array.from(
-            document.querySelectorAll('app-pop-open-pane button.cart-button, button.cart-button'),
-          );
-          return {
-            count: els.length,
-            items: els.map((el) => {
-              const r = el.getBoundingClientRect();
-              const cs = getComputedStyle(el);
-              return {
-                rect: { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), bottom: Math.round(r.bottom) },
-                display: cs.display,
-                visibility: cs.visibility,
-                opacity: cs.opacity,
-                offsetParentNotNull: (el as HTMLElement).offsetParent !== null,
-                disabled: (el as HTMLButtonElement).disabled,
-                ariaDisabled: el.getAttribute('aria-disabled'),
-                // box-and-style "visible" heuristic (independent of Playwright's check below)
-                looksVisible:
-                  r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0,
-              };
-            }),
-            itemLoadingCount: document.querySelectorAll('.item-loading, [class*="item-loading" i]').length,
-          };
-        });
-
-      try {
-        const atD0b = await measureCartBtn();
-        await relayToTrace(
-          page,
-          `\n===== STEP-D CART-BUTTON VISIBILITY @d0b =====\n${JSON.stringify(atD0b, null, 2)}\n===== END STEP-D CART-BUTTON VISIBILITY @d0b =====\n`,
-        );
-      } catch (e) {
-        await relayToTrace(page, `[STEP-D CART-BUTTON VISIBILITY @d0b] probe error (non-fatal): ${(e as Error).message}`);
-      }
-
-      // Bounded ~10s poll using Playwright's OWN visibility check (what toBeVisible uses):
-      // does the cart button become visible, and when?
-      let becameVisibleAtMs: number | null = null;
-      const cartBtnLoc = page.locator('app-pop-open-pane button.cart-button, button.cart-button').first();
-      for (let i = 0; i < 20; i++) {
-        if (await cartBtnLoc.isVisible().catch(() => false)) {
-          becameVisibleAtMs = i * 500;
-          break;
-        }
-        await page.waitForTimeout(500);
-      }
-      await relayToTrace(
-        page,
-        `[STEP-D CART-BUTTON VISIBILITY poll] becameVisibleWithin10s=${becameVisibleAtMs !== null} at=${becameVisibleAtMs}ms`,
-      );
-      try {
-        const atFinal = await measureCartBtn();
-        await relayToTrace(
-          page,
-          `\n===== STEP-D CART-BUTTON VISIBILITY @final =====\n${JSON.stringify(atFinal, null, 2)}\n===== END STEP-D CART-BUTTON VISIBILITY @final =====\n`,
-        );
-      } catch (e) {
-        await relayToTrace(page, `[STEP-D CART-BUTTON VISIBILITY @final] probe error (non-fatal): ${(e as Error).message}`);
-      }
-
-      // CAPABILITY: the item DETAIL / customization view loaded -- an add-to-cart
-      // control OR a customization (size/crust/options) region is present. DOM-signal
-      // based, NOT a URL assertion (SPA nav; the route is unknown + may not change).
-      // ★ Use the CLASS, not the accessible name: the add button reads "Add to cart •
-      // $14.00" SPLIT ACROSS SPANS, so getByRole name-match never resolved it and this
-      // gate timed out at 20s even though the pane was open (trace 849205). Step e
-      // already proved button.cart-button is correct; this makes step d consistent. The
-      // customization-text .or() stays as a fallback for items that DO gate on size/crust.
-      await expect(
-        page
-          .locator('app-pop-open-pane button.cart-button, button.cart-button')
-          .or(page.getByText(/size|crust|select an option|customize|quantity/i))
-          .first(),
-        'STEP d: item-detail did not load (no cart-button by class, no customization region) -- read the "d:item-detail" dump.',
-      ).toBeVisible({ timeout: 20000 });
+      // NOTE (trace 849349): the previously-here capability assertion + the #23 visibility
+      // probe are REMOVED. The probe PROVED the cart button is fully visible at d0b
+      // (rect 536x48, display:block, visibility:visible, opacity:1, offsetParent!=null,
+      // disabled:false, Playwright isVisible()=true at 0ms) -- so every hidden/zero-size/
+      // hydration theory is falsified. Yet the removed assertion's compound locator
+      // (`app-pop-open-pane button.cart-button, button.cart-button` .or customization,
+      // .first()) timed out at 20s on that provably-visible button -- a malfunctioning,
+      // REDUNDANT gate: L575 above already confirms the pane opened, and step e's own census
+      // + gate are the real cart-button checkpoint. We stop stacking step-d cart-button gates
+      // and let step e run. Chain: 575 pane gate -> d0b dump -> d:item-detail dump -> step e.
       await dumpDom(
         page,
         'd:item-detail',
