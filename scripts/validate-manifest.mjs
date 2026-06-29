@@ -21,6 +21,28 @@ for (const m of manifest.monitors ?? []) {
   if (!m.name) errors.push(`Monitor ${m.id} missing name`);
   if (!m.script || !/^monitors\/.+\.spec\.ts$/.test(m.script)) errors.push(`Monitor ${m.id} has invalid script path: ${m.script}`);
   if (m.kind !== 'browser') errors.push(`Monitor ${m.id} has unsupported kind: ${m.kind}`);
+
+  // B10 trace-redaction: a sensitive monitor MUST declare valid redact_patterns before it can ship.
+  if (m.sensitive !== undefined && typeof m.sensitive !== 'boolean') {
+    errors.push(`Monitor ${m.id} sensitive must be a boolean`);
+  }
+  if (m.redact_patterns !== undefined) {
+    if (!Array.isArray(m.redact_patterns) || !m.redact_patterns.every((p) => typeof p === 'string')) {
+      errors.push(`Monitor ${m.id} redact_patterns must be an array of strings`);
+    } else {
+      for (const p of m.redact_patterns) {
+        try {
+          new RegExp(p);
+        } catch {
+          errors.push(`Monitor ${m.id} redact_patterns: invalid regex ${JSON.stringify(p)}`);
+        }
+      }
+    }
+  }
+  // ★ THE GATE: redaction REQUIRED before a sensitive monitor can be enabled.
+  if (m.sensitive === true && (!Array.isArray(m.redact_patterns) || m.redact_patterns.length === 0)) {
+    errors.push(`Monitor ${m.id} is marked sensitive but declares no redact_patterns — B10 requires redaction before enable`);
+  }
 }
 
 for (const m of manifest.monitors ?? []) {

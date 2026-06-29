@@ -12,6 +12,11 @@
         "type": "object",
         "required": ["id", "name", "script", "kind"],
         "additionalProperties": false,
+        "if": { "properties": { "sensitive": { "const": true } }, "required": ["sensitive"] },
+        "then": {
+          "required": ["redact_patterns"],
+          "properties": { "redact_patterns": { "minItems": 1 } }
+        },
         "properties": {
           "id": {
             "type": "string",
@@ -29,7 +34,16 @@
           "tags": { "type": "array", "items": { "type": "string" } },
           "description": { "type": "string" },
           "target": { "type": "string" },
-          "enabledByDefault": { "type": "boolean" }
+          "enabledByDefault": { "type": "boolean" },
+          "sensitive": {
+            "type": "boolean",
+            "description": "B10: a cart/auth monitor whose trace can carry session tokens / PII. REQUIRES redact_patterns. The runner then skips both trace zips, omits screenshots from RCA, scrubs trace_signals, and genericises error_message."
+          },
+          "redact_patterns": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "B10: regex strings scrubbed from trace_signals (network URLs + console) for a sensitive monitor. Required (≥1) when sensitive is true; the built-in token denylist applies regardless."
+          }
         }
       }
     }
