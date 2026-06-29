@@ -477,82 +477,92 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       );
     });
 
-    // ---- STEP e: add to cart (carry-out context already set) -----------------------
-    // GATE-E -- a cheese pizza may FORCE size/crust/options before "Add" enables. We
-    // make a best-effort pass at any required single-choice options, then add. If the
-    // add control stays disabled/absent, this step KNOWN-FAILS LOUDLY and the dump
-    // shows the required-customization gate to model next.
+    // ---- STEP e: add to cart -------------------------------------------------------
+    // GATE-E (trace 848672): the cheese-pizza detail pane (app-pop-open-pane) renders a
+    // complete orderable item -- <h1 class="item-name">Thin Crust Cheese Pizza - 8
+    // Slices</h1> ($14.00). NO required size/crust gate (dipping sauces are OPTIONAL
+    // checkboxes -- leave unchecked; quantity defaults to 1 -- leave it). THE ADD BUTTON
+    // is <button class="cart-button"> "Add to cart • $14.00" (NOT disabled). The prior
+    // run matched by accessible-name (/add to cart/) on a button whose name is split
+    // across spans -- flaky. Use the CLASS.
     await step('add cheese pizza to cart', async () => {
       await dismissInterstitials(page);
-
-      // Best-effort: satisfy a required option group by picking its FIRST radio/option
-      // (e.g. a default size). Resilient -- ANY first option, never a named one.
-      const firstOption = page
-        .getByRole('radio')
-        .or(page.locator('[role="option"], [data-testid*="option" i] button'))
-        .first();
-      try {
-        if (await firstOption.isVisible({ timeout: 4000 })) {
-          await firstOption.click({ timeout: 4000 });
-        }
-      } catch {
-        /* best-effort -- there may be no required options for plain cheese */
-      }
 
       await dumpDom(
         page,
         'e:before-add',
         [
-          { name: 'add-to-cart button', selector: 'button:has-text("Add"), [data-testid*="add" i]' },
-          { name: 'disabled add', selector: 'button[disabled]:has-text("Add"), button[aria-disabled="true"]:has-text("Add")' },
-          { name: 'required-customization gate', selector: 'text=/required|please select|choose a size|select an option/i' },
+          { name: 'item name', selector: 'h1.item-name, .item-name' },
+          { name: 'cart-button (real)', selector: 'app-pop-open-pane button.cart-button, button.cart-button' },
+          { name: 'disabled cart-button', selector: 'button.cart-button[disabled], button.cart-button[aria-disabled="true"]' },
+          { name: 'optional dipping-sauce checkboxes (do NOT click)', selector: 'input[type="checkbox"], [role="checkbox"]' },
         ],
-        '[role="dialog"], dialog, main',
+        'app-pop-open-pane, [role="dialog"], dialog, main',
       );
 
+      // VERIFIED selector: button.cart-button inside the detail pane. Accessible-name
+      // fallback only if the class ever changes.
       const addToCart = page
-        .getByRole('button', { name: /add to (cart|order|bag)|^add( \$|\b)/i })
+        .locator('app-pop-open-pane button.cart-button, button.cart-button')
+        .or(page.getByRole('button', { name: /add to cart/i }))
         .first();
-      // LOUD known-fail: if Add never becomes actionable, the assertion message names
-      // the GATE so the trace reader knows to read the e:before-add dump.
       await expect(
         addToCart,
-        'GATE-E: add-to-cart control not visible -- cheese pizza likely forces required ' +
-          'size/crust/options before Add. Read the "e:before-add" DOM dump for the gate.',
+        'GATE-E: add-to-cart control (button.cart-button) not visible -- read the "e:before-add" dump.',
       ).toBeVisible({ timeout: 20000 });
       await addToCart.click({ timeout: 5000 });
+
+      // Bounded wait for the add to take effect (the detail pane typically closes).
+      await page
+        .locator('app-pop-open-pane')
+        .first()
+        .waitFor({ state: 'hidden', timeout: 12000 })
+        .catch(() => {
+          /* the pane may stay open with an inline confirmation -- the dump reveals it */
+        });
       await dismissInterstitials(page);
 
-      // CAPABILITY: an add fired -- a cart-count badge incremented OR an "added"
-      // confirmation/mini-cart appeared. Either signal proves the mutation; we don't
-      // assert an exact count (resilient to a dirty start).
+      // RECON DUMP [AFTER ADD TO CART] -- what does adding DO? (pane close? cart-count
+      // badge? "added to cart" toast?) Drives the cart-open selector next.
+      await dumpDom(
+        page,
+        'AFTER ADD TO CART',
+        [
+          { name: 'detail pane still open', selector: 'app-pop-open-pane' },
+          { name: 'cart count badge', selector: '[class*="cart-count" i], [data-testid*="cart-count" i], [aria-label*="cart" i] [class*="count" i]' },
+          { name: 'added confirmation/toast', selector: 'text=/added to (cart|order|bag)|item added|added/i' },
+          { name: 'header cart affordance', selector: '[class*="cart" i] button, button[aria-label*="cart" i], [data-testid*="cart" i]' },
+          { name: 'view cart/checkout CTA', selector: 'text=/view (cart|order|bag)|checkout|cart/i' },
+        ],
+        'header, [role="banner"], app-pop-open-pane, [role="dialog"], main',
+      );
+
+      // CAPABILITY: an add fired -- a cart-count badge / "added" toast / a cart affordance
+      // appeared (or the pane closed onto one). We do NOT assert an exact count (resilient
+      // to a dirty start); the dump confirms the precise signal for the next iteration.
       await expect(
         page
           .getByText(/added to (cart|order|bag)|item added|added/i)
+          .or(page.locator('[class*="cart-count" i], [data-testid*="cart-count" i], [aria-label*="cart" i]'))
           .or(page.getByRole('button', { name: /cart|bag|checkout|view order/i }))
-          .or(page.locator('[data-testid*="cart-count" i], [aria-label*="cart" i]'))
           .first(),
-        'GATE-E: no add-to-cart confirmation/cart signal after clicking Add. Read "e:after-add".',
+        'GATE-E: no add-to-cart signal after clicking button.cart-button -- read "AFTER ADD TO CART".',
       ).toBeVisible({ timeout: 20000 });
-      await dumpDom(
-        page,
-        'e:after-add',
-        [
-          { name: 'cart count badge', selector: '[data-testid*="cart-count" i], [aria-label*="cart" i] [class*="count" i]' },
-          { name: 'added confirmation', selector: 'text=/added to (cart|order|bag)|item added/i' },
-          { name: 'view cart CTA', selector: 'text=/view (cart|order|bag)|checkout|cart/i' },
-        ],
-        'header, [role="banner"], [role="dialog"], main',
-      );
     });
 
     // ---- STEP f: open cart, assert the pizza line item -----------------------------
+    // Cart DOM NOT yet captured -- open the cart, DUMP [CART CONTENTS], assert a
+    // /cheese|pizza/ line item exists (capability, resilient -- not an exact item id).
     await step('open cart and assert the cheese pizza line item', async () => {
       await dismissInterstitials(page);
+
+      // Open/view the cart. The header cart affordance shape is unknown -- try a view-
+      // cart/checkout CTA, then a cart icon/labelled control. A mini-cart may already be
+      // open after the add (best-effort -- non-fatal).
       const cartButton = page
         .getByRole('link', { name: /cart|bag|view order|checkout/i })
         .or(page.getByRole('button', { name: /cart|bag|view order|checkout/i }))
-        .or(page.locator('[data-testid*="cart" i], [aria-label*="cart" i]'))
+        .or(page.locator('[class*="cart" i] button, button[aria-label*="cart" i], [data-testid*="cart" i]'))
         .first();
       try {
         if (await cartButton.isVisible({ timeout: 10000 })) {
@@ -563,22 +573,26 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       }
       await dismissInterstitials(page);
 
-      // CAPABILITY: the cart SHOWS the pizza -- a line item matching pizza/cheese
-      // resiliently (not the exact item name). The mini-cart/page shape is unknown.
-      await expect(
-        page.getByText(/cheese/i).or(page.getByText(/pizza/i)).first(),
-        'cart does not show a cheese/pizza line item -- read the "f:cart-contents" dump.',
-      ).toBeVisible({ timeout: 20000 });
+      // RECON DUMP [CART CONTENTS] -- the cart container + line-item + open/view control.
       await dumpDom(
         page,
-        'f:cart-contents',
+        'CART CONTENTS',
         [
-          { name: 'line items', selector: '[data-testid*="line" i], [data-testid*="cart-item" i], li' },
-          { name: 'cheese/pizza item', selector: 'text=/cheese|pizza/i' },
-          { name: 'remove affordance', selector: 'text=/remove|delete|trash/i, [aria-label*="remove" i], [data-testid*="remove" i]' },
+          { name: 'cart container', selector: '[class*="cart" i], aside, [role="dialog"]' },
+          { name: 'line items', selector: '[data-testid*="line" i], [data-testid*="cart-item" i], [class*="cart-item" i], [class*="line-item" i], li' },
+          { name: 'cheese/pizza line item', selector: 'text=/cheese|pizza/i' },
+          { name: 'open/view-cart control', selector: '[class*="cart" i] button, button[aria-label*="cart" i], [data-testid*="cart" i], text=/view (cart|order|bag)|checkout/i' },
+          { name: 'remove affordance', selector: 'button:has-text("Remove"), [aria-label*="remove" i], [data-testid*="remove" i], [class*="remove" i], [class*="trash" i]' },
         ],
-        '[role="dialog"], dialog, main, aside',
+        '[role="dialog"], dialog, aside, [class*="cart" i], main',
       );
+
+      // CAPABILITY: the cart SHOWS the pizza -- a line item matching cheese/pizza
+      // resiliently (not the exact item name).
+      await expect(
+        page.getByText(/cheese/i).or(page.getByText(/pizza/i)).first(),
+        'cart does not show a cheese/pizza line item -- read the "CART CONTENTS" dump.',
+      ).toBeVisible({ timeout: 20000 });
     });
   } finally {
     // ---- STEP g: SELF-CLEAN -- ALWAYS attempt cart teardown ------------------------
@@ -605,21 +619,26 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         }
         await dismissInterstitials(page);
 
+        // RECON DUMP [CART REMOVE CONTROLS] -- the remove/delete/trash affordance per
+        // line item (not yet captured). The next iteration tightens the remove selector
+        // from this dump's region outerHTML.
         await dumpDom(
           page,
-          'g:cleanup-start',
+          'CART REMOVE CONTROLS',
           [
-            { name: 'line items present', selector: '[data-testid*="cart-item" i], [data-testid*="line" i], li' },
-            { name: 'remove buttons', selector: '[aria-label*="remove" i], [data-testid*="remove" i], button:has-text("Remove")' },
+            { name: 'line items present', selector: '[data-testid*="cart-item" i], [data-testid*="line" i], [class*="cart-item" i], [class*="line-item" i], li' },
+            { name: 'remove buttons (text/label/testid)', selector: 'button:has-text("Remove"), button:has-text("Delete"), [aria-label*="remove" i], [aria-label*="delete" i], [data-testid*="remove" i]' },
+            { name: 'remove/trash by class', selector: '[class*="remove" i], [class*="trash" i], [class*="delete" i]' },
+            { name: 'cheese/pizza line still present', selector: 'text=/cheese|pizza/i' },
           ],
-          '[role="dialog"], dialog, main, aside',
+          '[role="dialog"], dialog, aside, [class*="cart" i], main',
         );
 
         // Remove every removable line item (handles a dirty start too -- clears whatever
         // is there, not just our pizza). Bounded loop so a stuck remove can't spin.
         const removeLocator = page
           .getByRole('button', { name: /remove|delete/i })
-          .or(page.locator('[aria-label*="remove" i], [data-testid*="remove" i]'));
+          .or(page.locator('[aria-label*="remove" i], [aria-label*="delete" i], [data-testid*="remove" i], button[class*="remove" i], button[class*="trash" i], button[class*="delete" i]'));
         for (let i = 0; i < 10; i++) {
           let remaining = 0;
           try {
