@@ -775,10 +775,25 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       // Angular SPA renders NO reliable DOM badge/toast. Arm the response listener BEFORE the
       // click so we capture the mutation's real result (the old DOM/header-icon checks were a
       // FALSE POSITIVE -- they matched always-present chrome and passed while the add no-opped).
+      // Request-level flag: did the cart-items POST REQUEST fire at all? This lets us tell a
+      // TIMEOUT-after-the-POST-fired (false negative — the add worked, we just didn't catch the
+      // response in time; cloud trace 849441) APART from a genuine no-op (no request attempted).
+      let cartPostRequestSeen = false;
+      const onCartReq = (req: import('@playwright/test').Request) => {
+        if (req.method() === 'POST' && /\/cart-items(\?|$)/.test(req.url())) cartPostRequestSeen = true;
+      };
+      page.on('request', onCartReq);
+
+      // ARM the response wait. ★ 60s (was 20s): the window is armed BEFORE the click ladder,
+      // which itself can consume ~10s (scrollIntoView + actionability retries on the animating
+      // pane), and the cloud handler defers the POST behind upstream calls (cart context,
+      // commitment-times) — in trace 849441 the POST fired AFTER the 20s window, returned 200,
+      // and the cart populated, yet the spec went RED. 60s covers the realistic arm→POST gap.
+      const CART_WAIT_MS = 60_000;
       const addRespPromise = page
         .waitForResponse(
           (r) => r.request().method() === 'POST' && /\/cart-items(\?|$)/.test(r.url()),
-          { timeout: 20000 },
+          { timeout: CART_WAIT_MS },
         )
         .catch(() => null);
 
@@ -819,10 +834,22 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       // on always-present header chrome. No navigation happens before this -- we verify the
       // SAME cart the POST populated (navigating to / would reset to a fresh empty guest cart).
       const addResp = await addRespPromise;
-      expect(
-        addResp,
-        'GATE-E: no POST .../cart-items fired after clicking Add -- the add no-opped (dead handler / wrong target / API contract change).',
-      ).not.toBeNull();
+      page.off('request', onCartReq);
+      // ★ HONEST FAILURE: addResp is null ONLY on a wait TIMEOUT. Distinguish the two causes
+      // via the request-level flag instead of blaming a "no-op" on every timeout (the old
+      // message claimed "the add no-opped" even in 849441, where a 200 DID fire — a misleading
+      // false negative that cost a debugging round).
+      if (!addResp) {
+        const secs = CART_WAIT_MS / 1000;
+        throw new Error(
+          cartPostRequestSeen
+            ? `GATE-E: the cart-items POST REQUEST fired but its response was NOT observed within ${secs}s ` +
+              `(click strategy: ${clickStrategy}). The add very likely SUCCEEDED — this is a monitor/timing issue, ` +
+              `NOT a no-op; raise CART_WAIT_MS. Check the trace network log for the POST .../cart-items response.`
+            : `GATE-E: NO cart-items POST request was attempted within ${secs}s (click strategy: ${clickStrategy}) — ` +
+              `the add genuinely did not fire (dead handler / wrong target / API contract change).`,
+        );
+      }
 
       const status = addResp!.status();
       type CartItem = { cartItemId?: string; quantity?: number };
