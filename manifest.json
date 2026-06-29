@@ -26,6 +26,17 @@
       "enabledByDefault": false
     },
     {
+      "id": "meals2go-cheese-pizza-cart",
+      "name": "Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)",
+      "script": "monitors/wegmans/meals2go-cheese-pizza-cart.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["meals2go", "ecommerce", "cart", "carryout", "journey"],
+      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item, then self-clean by removing it. Cart-mutating + store-session bearing; enabledByDefault:false and ungated until the B10 trace-redaction rule lands.",
+      "target": "https://www.meals2go.com",
+      "enabledByDefault": false
+    },
+    {
       "id": "synthwatch-self-homepage",
       "name": "SynthWatch dashboard homepage",
       "script": "monitors/synthwatch/dashboard-homepage.spec.ts",
