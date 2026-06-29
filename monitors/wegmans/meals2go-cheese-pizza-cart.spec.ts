@@ -468,16 +468,72 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
     });
 
     // ---- STEP d: open a CHEESE pizza ----------------------------------------------
+    // ROOT CAUSE (census, trace 849132): the flow died HERE (step d), never reaching
+    // step e. The Pizza & Wings menu has SUB-CUISINE TABS and loads with "Pizza Promo &
+    // Packages" SELECTED by default. The orderable "Thin Crust Cheese Pizza - 8 Slices"
+    // lives under the "Thin Crust Pizza" tab -- so on the default Promo tab the
+    // .first() /cheese/i match was a promo/package tile (or a non-navigating text node),
+    // the click opened no item detail, and the toBeVisible timed out at 20s.
     await step('open a cheese pizza item', async () => {
       await dismissInterstitials(page);
-      // Match a CHEESE pizza resiliently by role/text; .first() of cheese matches --
-      // NEVER a specific SKU/item-id. A product card may be a link or a button.
-      const cheesePizza = page
-        .getByRole('link', { name: /cheese/i })
-        .or(page.getByRole('button', { name: /cheese/i }))
-        .or(page.getByText(/cheese/i))
+
+      // d.1 -- select the THIN CRUST PIZZA sub-cuisine tab FIRST. VERIFIED id from the
+      // census; text/role fallbacks. Best-effort + logged: a menu restructure must not
+      // hard-break (we continue and the d0 dump shows what happened).
+      const thinCrustTab = page
+        .locator('button#cuisine-thin-crust-pizza')
+        .or(page.getByRole('tab', { name: /thin crust pizza/i }))
+        .or(page.getByRole('button', { name: /thin crust pizza/i }))
         .first();
-      await expect(cheesePizza).toBeVisible({ timeout: 20000 });
+      let tabClicked = false;
+      try {
+        if (await thinCrustTab.isVisible({ timeout: 8000 })) {
+          await thinCrustTab.click({ timeout: 5000 });
+          tabClicked = true;
+          await page.waitForTimeout(1500); // bounded settle for the thin-crust listing
+        }
+      } catch {
+        /* best-effort -- menu may be restructured; the d0 dump reveals the truth */
+      }
+      await dismissInterstitials(page);
+      await relayToTrace(
+        page,
+        `[d0:thin-crust-tab] thin-crust sub-cuisine tab found+clicked: ${tabClicked}`,
+      );
+
+      // d.2 -- RECON DUMP [d0:thin-crust-listing]: confirm the tab-select worked and show
+      // what cheese items are present under it (instrument the fix, don't assume it).
+      await dumpDom(
+        page,
+        'd0:thin-crust-listing',
+        [
+          { name: 'thin-crust tab (selected?)', selector: 'button#cuisine-thin-crust-pizza, button#cuisine-thin-crust-pizza[aria-selected="true"], button#cuisine-thin-crust-pizza.selected' },
+          { name: 'clickable cheese items', selector: 'a:has-text("cheese"), button:has-text("cheese")' },
+          { name: 'cheese text (any)', selector: 'text=/cheese/i' },
+          { name: 'product cards', selector: '[data-testid*="product" i], [data-testid*="item" i], article, li' },
+        ],
+        'main',
+      );
+
+      // d.3 -- match a CHEESE pizza, preferring a CLICKABLE product card (link/button)
+      // over a bare text node. Priority: accessible-named link -> button -> any clickable
+      // cheese card. .first() of the chosen kind -- resilient (no hardcoded SKU), but it
+      // lands on an ORDERABLE item, not a promo tile / non-navigating text.
+      const cheeseLink = page.getByRole('link', { name: /cheese/i }).first();
+      const cheeseButton = page.getByRole('button', { name: /cheese/i }).first();
+      const cheeseCard = page
+        .locator(
+          'a:has-text("cheese"), button:has-text("cheese"), [data-testid*="product" i]:has-text("cheese"), [data-testid*="item" i]:has-text("cheese"), article:has-text("cheese"), li:has-text("cheese")',
+        )
+        .first();
+      let cheesePizza = cheeseLink;
+      if (!(await cheeseLink.count().catch(() => 0))) {
+        cheesePizza = (await cheeseButton.count().catch(() => 0)) ? cheeseButton : cheeseCard;
+      }
+      await expect(
+        cheesePizza,
+        'STEP d: no clickable cheese pizza under the thin-crust listing -- read the "d0:thin-crust-listing" dump.',
+      ).toBeVisible({ timeout: 20000 });
       await cheesePizza.click({ timeout: 5000 });
       await dismissInterstitials(page);
 
