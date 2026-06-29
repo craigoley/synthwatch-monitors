@@ -108,6 +108,11 @@ async function dumpDom(
 }
 
 test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }) => {
+  // Captured from the add-to-cart API response (step e) so the finally can SELF-CLEAN the
+  // SAME cart via the API -- never by navigating to / (which resets to a fresh guest cart).
+  let cleanupCartItemsUrl: string | null = null;
+  let cleanupAuthHeader: string | undefined;
+  let cleanupItemIds: string[] = [];
   try {
     // ---- STEP a: landing renders --------------------------------------------------
     // GROUND TRUTH (trace 847963): meals2go.com loads a LANDING page whose primary CTA
@@ -765,6 +770,18 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         await relayToTrace(page, `[PRE-CLICK CART-BUTTON STATE] probe error (non-fatal): ${(e as Error).message}`);
       }
 
+      // ★ VERIFY ADD-TO-CART VIA THE API, NOT THE UI. Network capture proved the add fires
+      // POST .../cart-items -> 200 with the pizza in cartItems (canCheckout:true), while this
+      // Angular SPA renders NO reliable DOM badge/toast. Arm the response listener BEFORE the
+      // click so we capture the mutation's real result (the old DOM/header-icon checks were a
+      // FALSE POSITIVE -- they matched always-present chrome and passed while the add no-opped).
+      const addRespPromise = page
+        .waitForResponse(
+          (r) => r.request().method() === 'POST' && /\/cart-items(\?|$)/.test(r.url()),
+          { timeout: 20000 },
+        )
+        .catch(() => null);
+
       // 2. Escalating click strategies -- stop at the first that does not throw, LOG which.
       //    a) scrollIntoViewIfNeeded + normal click (actionability-checked)
       //    b) force click (bypasses actionability -- if THIS lands, it was interception)
@@ -796,179 +813,74 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         `\n===== CLICK STRATEGY ===== ${clickStrategy}${clickErrors ? `\n  errors: ${clickErrors}` : ''}\n===== END CLICK STRATEGY =====\n`,
       );
 
-      // Bounded wait for the add to take effect (the detail pane typically closes).
-      await page
-        .locator('app-pop-open-pane')
-        .first()
-        .waitFor({ state: 'hidden', timeout: 12000 })
-        .catch(() => {
-          /* the pane may stay open with an inline confirmation -- the dump reveals it */
-        });
-      await dismissInterstitials(page);
+      // ★ THE REAL ASSERTION: the add-to-cart mutation succeeded. The cart-items POST must
+      // return 200 with a NON-EMPTY cartItems carrying the added item (quantity >= 1). This
+      // FAILS if the add no-ops (no request / 4xx / 200-but-empty) -- it can no longer pass
+      // on always-present header chrome. No navigation happens before this -- we verify the
+      // SAME cart the POST populated (navigating to / would reset to a fresh empty guest cart).
+      const addResp = await addRespPromise;
+      expect(
+        addResp,
+        'GATE-E: no POST .../cart-items fired after clicking Add -- the add no-opped (dead handler / wrong target / API contract change).',
+      ).not.toBeNull();
 
-      // RECON DUMP [AFTER ADD TO CART] -- what does adding DO? (pane close? cart-count
-      // badge? "added to cart" toast?) Drives the cart-open selector next.
-      await dumpDom(
-        page,
-        'AFTER ADD TO CART',
-        [
-          { name: 'detail pane still open', selector: 'app-pop-open-pane' },
-          { name: 'cart count badge', selector: '[class*="cart-count" i], [data-testid*="cart-count" i], [aria-label*="cart" i] [class*="count" i]' },
-          { name: 'added confirmation/toast', selector: 'text=/added to (cart|order|bag)|item added|added/i' },
-          { name: 'header cart affordance', selector: '[class*="cart" i] button, button[aria-label*="cart" i], [data-testid*="cart" i]' },
-          { name: 'view cart/checkout CTA', selector: 'text=/view (cart|order|bag)|checkout|cart/i' },
-        ],
-        'header, [role="banner"], app-pop-open-pane, [role="dialog"], main',
-      );
-
-      // CAPABILITY: an add fired -- a cart-count badge / "added" toast / a cart affordance
-      // appeared (or the pane closed onto one). We do NOT assert an exact count (resilient
-      // to a dirty start); the dump confirms the precise signal for the next iteration.
-      await expect(
-        page
-          .getByText(/added to (cart|order|bag)|item added|added/i)
-          .or(page.locator('[class*="cart-count" i], [data-testid*="cart-count" i], [aria-label*="cart" i]'))
-          .or(page.getByRole('button', { name: /cart|bag|checkout|view order/i }))
-          .first(),
-        'GATE-E: no add-to-cart signal after clicking button.cart-button -- read "AFTER ADD TO CART".',
-      ).toBeVisible({ timeout: 20000 });
-    });
-
-    // ---- STEP f: open cart, assert the pizza line item -----------------------------
-    // Cart DOM NOT yet captured -- open the cart, DUMP [CART CONTENTS], assert a
-    // /cheese|pizza/ line item exists (capability, resilient -- not an exact item id).
-    await step('open cart and assert the cheese pizza line item', async () => {
-      await dismissInterstitials(page);
-
-      // Open/view the cart. The header cart affordance shape is unknown -- try a view-
-      // cart/checkout CTA, then a cart icon/labelled control. A mini-cart may already be
-      // open after the add (best-effort -- non-fatal).
-      const cartButton = page
-        .getByRole('link', { name: /cart|bag|view order|checkout/i })
-        .or(page.getByRole('button', { name: /cart|bag|view order|checkout/i }))
-        .or(page.locator('[class*="cart" i] button, button[aria-label*="cart" i], [data-testid*="cart" i]'))
-        .first();
+      const status = addResp!.status();
+      type CartItem = { cartItemId?: string; quantity?: number };
+      type CartBody = { cartId?: string; cartItems?: CartItem[] };
+      let body: CartBody | null = null;
       try {
-        if (await cartButton.isVisible({ timeout: 10000 })) {
-          await cartButton.click({ timeout: 5000 });
-        }
+        body = (await addResp!.json()) as CartBody;
       } catch {
-        /* best-effort -- a mini-cart may already be open after add */
+        body = null;
       }
-      await dismissInterstitials(page);
+      expect(status, `GATE-E: cart-items responded HTTP ${status}, expected 200.`).toBe(200);
 
-      // RECON DUMP [CART CONTENTS] -- the cart container + line-item + open/view control.
-      await dumpDom(
+      const cartItems: CartItem[] = body && Array.isArray(body.cartItems) ? body.cartItems : [];
+      expect(
+        cartItems.length,
+        'GATE-E: cart-items returned 200 but cartItems is EMPTY -- the add no-opped server-side.',
+      ).toBeGreaterThan(0);
+      const totalQty = cartItems.reduce((s: number, it: CartItem) => s + (Number(it?.quantity) || 0), 0);
+      expect(totalQty, 'GATE-E: cartItems present but total quantity < 1.').toBeGreaterThanOrEqual(1);
+
+      // Capture the SAME-cart context (endpoint + Bearer auth + item ids) so the finally can
+      // self-clean via the API with NO navigation.
+      const addReq = addResp!.request();
+      cleanupCartItemsUrl = addReq.url();
+      cleanupAuthHeader = addReq.headers()['authorization'];
+      cleanupItemIds = cartItems
+        .map((it: CartItem) => it.cartItemId)
+        .filter((x): x is string => typeof x === 'string' && x.length > 0);
+
+      await relayToTrace(
         page,
-        'CART CONTENTS',
-        [
-          { name: 'cart container', selector: '[class*="cart" i], aside, [role="dialog"]' },
-          { name: 'line items', selector: '[data-testid*="line" i], [data-testid*="cart-item" i], [class*="cart-item" i], [class*="line-item" i], li' },
-          { name: 'cheese/pizza line item', selector: 'text=/cheese|pizza/i' },
-          { name: 'open/view-cart control', selector: '[class*="cart" i] button, button[aria-label*="cart" i], [data-testid*="cart" i], text=/view (cart|order|bag)|checkout/i' },
-          { name: 'remove affordance', selector: 'button:has-text("Remove"), [aria-label*="remove" i], [data-testid*="remove" i], [class*="remove" i], [class*="trash" i]' },
-        ],
-        '[role="dialog"], dialog, aside, [class*="cart" i], main',
+        `[CART-API VERIFIED] cart-items ${status} | cartItems=${cartItems.length} | totalQty=${totalQty} | cartId=${body?.cartId}`,
       );
-
-      // CAPABILITY: the cart SHOWS the pizza -- a line item matching cheese/pizza
-      // resiliently (not the exact item name).
-      await expect(
-        page.getByText(/cheese/i).or(page.getByText(/pizza/i)).first(),
-        'cart does not show a cheese/pizza line item -- read the "CART CONTENTS" dump.',
-      ).toBeVisible({ timeout: 20000 });
     });
   } finally {
-    // ---- STEP g: SELF-CLEAN -- ALWAYS attempt cart teardown ------------------------
-    // Runs even on a mid-flow failure (finally). Tolerates a dirty start: it does not
-    // assume the cart began empty; it removes what it can and asserts the cart ends
-    // empty (best-effort, never masks the original failure -- cleanup errors are
-    // swallowed so the real step failure is what surfaces).
-    await step('SELF-CLEAN: remove the cheese pizza from the cart', async () => {
+    // ---- STEP g: SELF-CLEAN via the cart API -- ALWAYS attempt teardown ------------
+    // Runs even on a mid-flow failure (finally). ★ Removes the added line item(s) on the
+    // SAME cart the POST populated, via DELETE .../cart-items/<id> with the captured Bearer
+    // auth -- NO navigation. (The old UI cleanup navigated to / which reset to a fresh empty
+    // GUEST cart and "cleaned" the wrong cart.) Best-effort: the guest cart is ephemeral
+    // (fresh per run), so a failed delete leaks nothing across runs; errors are swallowed so
+    // cleanup never masks the real verification result.
+    await step('SELF-CLEAN: remove the cheese pizza via the cart API', async () => {
       try {
-        await dismissInterstitials(page);
-
-        // Make sure a cart surface is open so remove controls are reachable.
-        const openCart = page
-          .getByRole('link', { name: /cart|bag|view order/i })
-          .or(page.getByRole('button', { name: /cart|bag|view order/i }))
-          .or(page.locator('[data-testid*="cart" i], [aria-label*="cart" i]'))
-          .first();
-        try {
-          if (await openCart.isVisible({ timeout: 6000 })) {
-            await openCart.click({ timeout: 4000 });
-          }
-        } catch {
-          /* best-effort */
+        if (!cleanupCartItemsUrl || !cleanupAuthHeader || cleanupItemIds.length === 0) {
+          console.log('[cleanup] no captured cart context (add did not populate a cart) -- nothing to remove. Guest cart is ephemeral.');
+          return;
         }
-        await dismissInterstitials(page);
-
-        // RECON DUMP [CART REMOVE CONTROLS] -- the remove/delete/trash affordance per
-        // line item (not yet captured). The next iteration tightens the remove selector
-        // from this dump's region outerHTML.
-        await dumpDom(
-          page,
-          'CART REMOVE CONTROLS',
-          [
-            { name: 'line items present', selector: '[data-testid*="cart-item" i], [data-testid*="line" i], [class*="cart-item" i], [class*="line-item" i], li' },
-            { name: 'remove buttons (text/label/testid)', selector: 'button:has-text("Remove"), button:has-text("Delete"), [aria-label*="remove" i], [aria-label*="delete" i], [data-testid*="remove" i]' },
-            { name: 'remove/trash by class', selector: '[class*="remove" i], [class*="trash" i], [class*="delete" i]' },
-            { name: 'cheese/pizza line still present', selector: 'text=/cheese|pizza/i' },
-          ],
-          '[role="dialog"], dialog, aside, [class*="cart" i], main',
-        );
-
-        // Remove every removable line item (handles a dirty start too -- clears whatever
-        // is there, not just our pizza). Bounded loop so a stuck remove can't spin.
-        const removeLocator = page
-          .getByRole('button', { name: /remove|delete/i })
-          .or(page.locator('[aria-label*="remove" i], [aria-label*="delete" i], [data-testid*="remove" i], button[class*="remove" i], button[class*="trash" i], button[class*="delete" i]'));
-        for (let i = 0; i < 10; i++) {
-          let remaining = 0;
+        const [base, qs] = cleanupCartItemsUrl.split('?');
+        for (const id of cleanupItemIds) {
+          const delUrl = `${base}/${encodeURIComponent(id)}${qs ? '?' + qs : ''}`;
           try {
-            remaining = await removeLocator.count();
-          } catch {
-            break;
-          }
-          if (remaining === 0) break;
-          if (i === 0 && remaining > 1) {
-            console.log(`[cleanup] cart had ${remaining} removable items at teardown -- possible DIRTY START; clearing all.`);
-          }
-          try {
-            await removeLocator.first().click({ timeout: 4000 });
-            await dismissInterstitials(page);
-            // Confirm a possible "remove item?" confirmation dialog.
-            const confirm = page.getByRole('button', { name: /^(remove|delete|yes|confirm)$/i }).first();
-            if (await confirm.isVisible({ timeout: 1500 }).catch(() => false)) {
-              await confirm.click({ timeout: 3000 });
-            }
-            await page.waitForTimeout(1000);
-          } catch {
-            break;
+            const res = await page.request.delete(delUrl, { headers: { authorization: cleanupAuthHeader } });
+            console.log(`[cleanup] DELETE cart-item ${id} -> ${res.status()}`);
+          } catch (e) {
+            console.log(`[cleanup] DELETE cart-item ${id} failed (swallowed): ${(e as Error).message}`);
           }
         }
-
-        await dumpDom(
-          page,
-          'g:cleanup-end',
-          [
-            { name: 'remaining line items', selector: '[data-testid*="cart-item" i], [data-testid*="line" i], li' },
-            { name: 'cheese/pizza still present', selector: 'text=/cheese|pizza/i' },
-            { name: 'empty-cart signal', selector: 'text=/cart is empty|no items|empty/i' },
-          ],
-          '[role="dialog"], dialog, main, aside',
-        );
-
-        // Best-effort assertion the cart is empty / the pizza is gone. Soft-checked so a
-        // cleanup limitation never masks the real step failure that brought us here.
-        const emptySignal = page
-          .getByText(/cart is empty|your cart is empty|no items/i)
-          .or(page.locator('[data-testid*="cart-item" i], [data-testid*="line" i]'));
-        const empty = await emptySignal
-          .first()
-          .isVisible({ timeout: 5000 })
-          .catch(() => false);
-        console.log(`[cleanup] post-teardown empty/gone signal observed: ${empty}`);
       } catch (e) {
         // Never let cleanup throw -- it must not overwrite the original failure.
         console.log(`[cleanup] teardown error (swallowed): ${(e as Error).message}`);
