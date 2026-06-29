@@ -560,11 +560,17 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       // CAPABILITY: the item DETAIL / customization view loaded -- an add-to-cart
       // control OR a customization (size/crust/options) region is present. DOM-signal
       // based, NOT a URL assertion (SPA nav; the route is unknown + may not change).
+      // ★ Use the CLASS, not the accessible name: the add button reads "Add to cart •
+      // $14.00" SPLIT ACROSS SPANS, so getByRole name-match never resolved it and this
+      // gate timed out at 20s even though the pane was open (trace 849205). Step e
+      // already proved button.cart-button is correct; this makes step d consistent. The
+      // customization-text .or() stays as a fallback for items that DO gate on size/crust.
       await expect(
         page
-          .getByRole('button', { name: /add to (cart|order|bag)|add$/i })
+          .locator('app-pop-open-pane button.cart-button, button.cart-button')
           .or(page.getByText(/size|crust|select an option|customize|quantity/i))
           .first(),
+        'STEP d: item-detail did not load (no cart-button by class, no customization region) -- read the "d:item-detail" dump.',
       ).toBeVisible({ timeout: 20000 });
       await dumpDom(
         page,
