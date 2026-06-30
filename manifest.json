@@ -108,6 +108,39 @@
       "description": "Search for chicken recipes, open the first result, assert the recipe detail page loads.",
       "target": "https://www.wegmans.com",
       "enabledByDefault": false
+    },
+    {
+      "id": "amore-reservations",
+      "name": "Amore: reservations OpenTable widget loads",
+      "script": "monitors/amore/amore-reservations.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["amore", "restaurant", "reservations", "opentable"],
+      "description": "Load wegmansamore.com/reservations and verify the embedded OpenTable booking widget loader fires (network), plus the RESERVE YOUR TABLE heading. Never books. Capability check; sensitive=false.",
+      "target": "https://wegmansamore.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "amore-menu",
+      "name": "Amore: menu page exposes a downloadable menu",
+      "script": "monitors/amore/amore-menu.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["amore", "restaurant", "menu"],
+      "description": "Load wegmansamore.com/menus and assert a downloadable menu link (PDF) is present -- the 'view the menu' affordance, resilient to dish/price changes.",
+      "target": "https://wegmansamore.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "nextdoor-homepage",
+      "name": "Next Door: homepage location picker",
+      "script": "monitors/nextdoor/nextdoor-homepage.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["nextdoor", "restaurant", "homepage", "location"],
+      "description": "Load wegmansnextdoor.com and assert both server-rendered location links (Rochester + Astor Place) render -- the homepage's location-picker capability.",
+      "target": "https://www.wegmansnextdoor.com",
+      "enabledByDefault": false
     }
   ]
 }
