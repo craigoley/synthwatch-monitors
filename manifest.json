@@ -32,16 +32,10 @@
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
       "tags": ["meals2go", "ecommerce", "cart", "carryout", "journey"],
-      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item via the cart-items API, then self-clean by removing it. Cart-mutating + store-session bearing; enabledByDefault:false. B10-compliant (sensitive + redact_patterns) but NOT yet enabled (no check_locations row).",
+      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item via the cart-items API, then self-clean by removing it. Cart-mutating but anonymous/accountless (no login, payment, or PII); self-cleans the added item. Non-sensitive by decision: the guest session token is short-lived and protects nothing.",
       "target": "https://www.meals2go.com",
       "enabledByDefault": false,
-      "sensitive": true,
-      "redact_patterns": [
-        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
-        "[Bb]earer\\s+[A-Za-z0-9._~+/-]+=*",
-        "(?:access_token|id_token|refresh_token|client_secret|sessiontoken)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9._~+/=-]+"
-      ]
+      "sensitive": false
     },
     {
       "id": "synthwatch-self-homepage",
@@ -171,16 +165,10 @@
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
       "tags": ["meals2go", "browse", "menu", "journey"],
-      "description": "Anonymous discovery journey: load meals2go.com/browse-menu/pizza-wings and assert the kitting menus API returns 200 + item cards render. NEVER carts. B10: meals2go carries a guest Authorization:Bearer even on anon browse, so sensitive=true + redact_patterns (mirrors meals2go-cheese-pizza-cart). On activation the DB check MUST be materialized with sensitive=true.",
+      "description": "Anonymous discovery journey: load meals2go.com/browse-menu/pizza-wings and assert the kitting menus API returns 200 + item cards render. NEVER carts. Anonymous/accountless against a public page (no login, payment, or PII). Non-sensitive by decision: the guest session token is short-lived and protects nothing.",
       "target": "https://www.meals2go.com",
       "enabledByDefault": false,
-      "sensitive": true,
-      "redact_patterns": [
-        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
-        "[Bb]earer\\s+[A-Za-z0-9._~+/-]+=*",
-        "(?:access_token|id_token|refresh_token|client_secret|sessiontoken)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9._~+/=-]+"
-      ]
+      "sensitive": false
     }
   ]
 }

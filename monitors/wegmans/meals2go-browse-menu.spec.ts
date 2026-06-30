@@ -9,14 +9,14 @@ import { test, expect, step, dismissInterstitials } from '../../lib/flow';
  * Distinct from meals2go-homepage (landing only) and meals2go-cheese-pizza-cart (the heavy
  * cart-mutating carryout flow). This is the lightweight anonymous "view a menu" capability.
  *
- * ★★ B10 = TRUE (the recon's headline finding). Even ANONYMOUS browse carries a guest
- * Authorization:Bearer token on every wegapi call (12 captured on this page). A non-sensitive
- * monitor's success-baseline + failure trace zips capture request HEADERS -> the guest Bearer
- * would leak (the exact meals2go-cart vector). The "anonymous => sensitive=false" heuristic
- * does NOT hold for meals2go. This monitor is sensitive=true with Bearer/JWT redact_patterns
- * (mirroring meals2go-cheese-pizza-cart) FROM DAY ONE. ★ On activation, the DB check MUST be
- * materialized WITH sensitive=true (the manifest flag is not the enforcement point -- the
- * meals2go-cart lesson: a window where manifest=true but DB=false leaked).
+ * SENSITIVITY: non-sensitive (sensitive=false; reclassified 2026-06-30). This is an
+ * anonymous, accountless flow against a public page -- no login, password, payment, or PII.
+ * The page does carry a guest Authorization:Bearer on wegapi calls, but that short-lived
+ * guest session token protects nothing, so redacting it buys no real protection -- the prior
+ * "guest Bearer => sensitive=true" premise is rejected. We keep MORE diagnostic signal and
+ * redact LESS. (If a future variant ever logs in / carries account or payment data, that
+ * variant must be sensitive=true with redact_patterns -- this rationale is scoped to the
+ * anonymous browse.)
  *
  * ★ GROUND TRUTH (recon 2026-06-30): /browse-menu/pizza-wings fetches its menu via
  * GET wegapi.azure-api.net/kitting/stores/16/storefronts/1/menus -> 200 (store 16 is the
