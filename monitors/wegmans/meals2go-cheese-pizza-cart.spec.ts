@@ -17,12 +17,13 @@ import { test, expect, step, assertLoaded, dismissInterstitials, type Page } fro
  *     file. The dumps are the whole point; this is a recon harness, not a
  *     known-green monitor. Search the trace for "===== DOM DUMP [<label>]".
  *
- * (b) DO NOT ENABLE AS A LIVE MONITOR until the B10 trace-redaction rule is
- *     established. This flow MUTATES a cart and carries STORE/FULFILLMENT
- *     SESSION state. Until cart + store-session state is guaranteed redacted
- *     from trace_signals, the success-baseline, and the AI-fed root-cause
- *     path, this monitor stays enabledByDefault:false with NO check_locations
- *     row. Enabling is gated on B10, full stop.
+ * (b) NON-SENSITIVE (sensitive=false; reclassified 2026-06-30). This flow mutates a
+ *     cart but is anonymous and accountless -- no login, password, payment, or PII.
+ *     The guest store/fulfillment session token it carries is short-lived and protects
+ *     nothing, so redacting it buys no real protection; the prior "guest session =>
+ *     sensitive=true" framing is rejected. We keep MORE diagnostic signal and redact
+ *     LESS. (A future logged-in / payment-bearing variant would be sensitive=true with
+ *     redact_patterns -- this is scoped to the anonymous guest cart-add.)
  *
  * (c) SELF-CLEANING CART CONTRACT. The flow adds a pizza, so it MUST remove it
  *     -- even on partial/mid-flow failure. The teardown runs in a finally block
