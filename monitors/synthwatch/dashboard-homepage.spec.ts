@@ -21,13 +21,19 @@ test('SynthWatch dashboard loads', async ({ page }) => {
     });
   });
 
-  await step('assert the monitor grid rendered', async () => {
+  await step('assert the dashboard app rendered', async () => {
     await assertLoaded(page, {
       urlPattern: /synthwatch-dashboard\.vercel\.app/i,
       timeoutMs: 15000,
     });
-    // A resilient "the app actually rendered" signal -- adjust to a stable bit of
-    // dashboard text/role that's always present when healthy.
-    await expect(page.locator('body')).toBeVisible({ timeout: 15000 });
+    // ★ MUST-GO-RED signal (recon 2026-06-30): the dashboard's Monitors view renders an
+    // <h1>Monitors</h1>. Assert THAT (a heading-role match, so it won't false-match the
+    // "Monitors" nav LINK) -- it's present on the healthy app and ABSENT on an error page /
+    // blank render / failed deploy. The old `expect(body).toBeVisible()` was true on EVERY
+    // page (incl. error pages) -> it could never go red (false positive). This can.
+    await expect(
+      page.getByRole('heading', { name: /monitors/i }).first(),
+      'SynthWatch dashboard: the "Monitors" heading did not render -- the app failed to load (error page / blank / failed deploy).',
+    ).toBeVisible({ timeout: 15000 });
   });
 });
