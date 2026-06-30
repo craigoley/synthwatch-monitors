@@ -141,6 +141,17 @@
       "description": "Load wegmansnextdoor.com and assert both server-rendered location links (Rochester + Astor Place) render -- the homepage's location-picker capability.",
       "target": "https://www.wegmansnextdoor.com",
       "enabledByDefault": false
+    },
+    {
+      "id": "nextdoor-reservations",
+      "name": "Next Door: reservations OpenTable widget loads",
+      "script": "monitors/nextdoor/nextdoor-reservations.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["nextdoor", "restaurant", "reservations", "opentable"],
+      "description": "Load wegmansnextdoor.com/rochester-new-york/reservations and verify the embedded OpenTable booking widget loader request fires (rid=2407), plus the Reserve Your Table heading. Mirrors amore-reservations. Never books. Capability check; sensitive=false.",
+      "target": "https://www.wegmansnextdoor.com",
+      "enabledByDefault": false
     }
   ]
 }
