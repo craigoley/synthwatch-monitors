@@ -152,6 +152,35 @@
       "description": "Load wegmansnextdoor.com/rochester-new-york/reservations and verify the embedded OpenTable booking widget loader request fires (rid=2407), plus the Reserve Your Table heading. Mirrors amore-reservations. Never books. Capability check; sensitive=false.",
       "target": "https://www.wegmansnextdoor.com",
       "enabledByDefault": false
+    },
+    {
+      "id": "wegmans-search-autocomplete",
+      "name": "Wegmans: search autocomplete suggestions",
+      "script": "monitors/wegmans/search-autocomplete.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "search", "autocomplete", "algolia"],
+      "description": "Type a partial query in the header search and assert the Algolia search-as-you-type query returns 200 + a suggestion option renders. NEVER submits (no Enter -- avoids the waterloo race). sensitive=false (public Algolia search key).",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false
+    },
+    {
+      "id": "meals2go-browse-menu",
+      "name": "Meals 2 Go: browse a cuisine menu (anon)",
+      "script": "monitors/wegmans/meals2go-browse-menu.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["meals2go", "browse", "menu", "journey"],
+      "description": "Anonymous discovery journey: load meals2go.com/browse-menu/pizza-wings and assert the kitting menus API returns 200 + item cards render. NEVER carts. B10: meals2go carries a guest Authorization:Bearer even on anon browse, so sensitive=true + redact_patterns (mirrors meals2go-cheese-pizza-cart). On activation the DB check MUST be materialized with sensitive=true.",
+      "target": "https://www.meals2go.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
+        "[Bb]earer\\s+[A-Za-z0-9._~+/-]+=*",
+        "(?:access_token|id_token|refresh_token|client_secret|sessiontoken)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9._~+/=-]+"
+      ]
     }
   ]
 }
