@@ -4,8 +4,8 @@ import { test, expect, step, dismissInterstitials } from '../../lib/flow';
  * Monitor: meals2go-cheese-pizza-cart
  *
  * Journey: meals2go.com → establish CARRY OUT fulfillment (Buffalo, NY → McKinley store) →
- * takeout menu → Pizza → a CHEESE pizza → add to cart → VERIFY via the cart-items API →
- * SELF-CLEAN (remove it via the API).
+ * takeout menu → Pizza → a CHEESE pizza → add to cart → VERIFY via the cart-items API.
+ * The guest cart is EPHEMERAL (fresh guest per run), so no self-clean is needed.
  *
  * ★ MUST-GO-RED ANCHOR (step e): the add-to-cart is verified over the NETWORK, not the UI. This
  * Angular SPA renders no reliable cart badge/toast, so the add fires POST .../cart-items and we
@@ -14,12 +14,14 @@ import { test, expect, step, dismissInterstitials } from '../../lib/flow';
  * old DOM/header-icon checks gave). A 60s response window covers the cloud handler deferring the
  * POST behind upstream calls (a shorter window once false-negatived a successful add, trace 849441).
  *
- * ★ SELF-CLEANING CART CONTRACT: the flow adds a pizza, so it MUST remove it — even on partial/
- * mid-flow failure. Teardown runs in a `finally` and removes the added line item(s) on the SAME
- * cart via DELETE .../cart-items/<id> with the captured Bearer auth — NO navigation (navigating to
- * / resets to a fresh empty guest cart and would "clean" the wrong one). Best-effort: the guest
- * cart is ephemeral, so a failed delete leaks nothing across runs; cleanup errors are swallowed so
- * they never mask the real verification result.
+ * ★ EPHEMERAL GUEST CART — NO SELF-CLEAN NEEDED (verified 2026-07-01). Each run is a fresh browser
+ * context → a freshly-minted guest-idp token → a fresh, EMPTY guest cart. Verified: a NEW guest
+ * token is minted per context, and repeated add runs showed NO cross-run accumulation (a different
+ * cartId each run, each cart holding only its own added item). The added pizza is discarded when the
+ * context closes; nothing persists to clean. The earlier finally did a cart-items/<id> DELETE that
+ * ALWAYS 404'd (the real remove endpoint uses a different, un-reverse-engineered shape) — but since
+ * nothing accumulates, no cleanup is required. If the runner ever persists guest sessions, a WORKING
+ * removal must be added then (reverse-engineer the real DELETE from the site's own remove call).
  *
  * sensitive=false (reclassified 2026-06-30): anonymous/accountless — no login, payment, or PII; the
  * guest session token is short-lived and protects nothing.
@@ -31,11 +33,6 @@ import { test, expect, step, dismissInterstitials } from '../../lib/flow';
  * filter to visible), and the add button (button.cart-button inside app-pop-open-pane).
  */
 test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }) => {
-  // Captured from the add-to-cart API response (step e) so the finally can SELF-CLEAN the SAME cart
-  // via the API — never by navigating to / (which resets to a fresh guest cart).
-  let cleanupCartItemsUrl: string | null = null;
-  let cleanupAuthHeader: string | undefined;
-  let cleanupItemIds: string[] = [];
   try {
     // ---- STEP a: landing renders --------------------------------------------------
     await step('open meals2go.com landing', async () => {
@@ -315,42 +312,12 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       ).toBeGreaterThan(0);
       const totalQty = cartItems.reduce((s: number, it: CartItem) => s + (Number(it?.quantity) || 0), 0);
       expect(totalQty, 'GATE-E: cartItems present but total quantity < 1.').toBeGreaterThanOrEqual(1);
-
-      // Capture the SAME-cart context (endpoint + Bearer auth + item ids) so the finally can
-      // self-clean via the API with NO navigation.
-      const addReq = addResp.request();
-      cleanupCartItemsUrl = addReq.url();
-      cleanupAuthHeader = addReq.headers()['authorization'];
-      cleanupItemIds = cartItems
-        .map((it: CartItem) => it.cartItemId)
-        .filter((x): x is string => typeof x === 'string' && x.length > 0);
     });
   } finally {
-    // ---- STEP g: SELF-CLEAN via the cart API -- ALWAYS attempt teardown ------------
-    // Runs even on a mid-flow failure. Removes the added line item(s) on the SAME cart via
-    // DELETE .../cart-items/<id> with the captured Bearer auth — NO navigation. Best-effort: the
-    // guest cart is ephemeral, so a failed delete leaks nothing; errors are swallowed so cleanup
-    // never masks the real verification result.
-    await step('SELF-CLEAN: remove the cheese pizza via the cart API', async () => {
-      try {
-        if (!cleanupCartItemsUrl || !cleanupAuthHeader || cleanupItemIds.length === 0) {
-          console.log('[cleanup] no captured cart context (add did not populate a cart) — nothing to remove. Guest cart is ephemeral.');
-          return;
-        }
-        const [base, qs] = cleanupCartItemsUrl.split('?');
-        for (const id of cleanupItemIds) {
-          const delUrl = `${base}/${encodeURIComponent(id)}${qs ? '?' + qs : ''}`;
-          try {
-            const res = await page.request.delete(delUrl, { headers: { authorization: cleanupAuthHeader } });
-            console.log(`[cleanup] DELETE cart-item ${id} -> ${res.status()}`);
-          } catch (e) {
-            console.log(`[cleanup] DELETE cart-item ${id} failed (swallowed): ${(e as Error).message}`);
-          }
-        }
-      } catch (e) {
-        // Never let cleanup throw — it must not overwrite the original failure.
-        console.log(`[cleanup] teardown error (swallowed): ${(e as Error).message}`);
-      }
-    });
+    // No server-side self-clean: the guest cart is EPHEMERAL (see the header). Each run is a fresh
+    // context → a fresh guest-idp token → a fresh, empty cart, discarded when the context closes;
+    // nothing accumulates across runs (verified 2026-07-01). The earlier cart-items/<id> DELETE here
+    // ALWAYS 404'd (wrong endpoint shape) yet nothing leaked — because there is nothing to clean.
+    console.log('[cart] guest cart is ephemeral — no self-clean needed (fresh, empty cart each run).');
   }
 });
