@@ -275,3 +275,159 @@ login-every-run monitor needs from this repo.
    transfer to an authenticated cart/account, where state persists across runs.
 7. **First-run verification pass** per `README.md:88-96` — all login selectors will be
    ★UNVERIFIED by definition until a sanctioned live run.
+
+---
+
+## 6. BOUNDARY CONTRACTS
+
+The format this repo exposes to the SynthWatch runner, evidenced from the manifest, the
+schema, the validator, and the harness comments.
+
+### The manifest contract (`manifest.json` / `manifest.schema.json`)
+
+Top level: `schemaVersion` (const 1, `manifest.schema.json:7`), optional `description`,
+and `monitors[]`. The runner "discovers scripts by reading this manifest after syncing the
+repo" (`manifest.json:4`).
+
+| field | required | semantics (as evidenced) | validated by |
+|---|---|---|---|
+| `id` | yes | stable binding key SynthWatch monitor config attaches to; never reuse/repurpose; retire by removing the SynthWatch monitor first (`manifest.schema.json:24`) | schema pattern + validator `validate-manifest.mjs:18-19` (pattern, uniqueness) |
+| `name` | yes | display name | validator `:21` (presence only; schema's 120-char cap **not executed**) |
+| `script` | yes | repo-relative Playwright spec path under `monitors/` | schema pattern + validator `:22` (pattern) + `:48-52` (file exists) + `:63-67` (no orphans) |
+| `kind` | yes | only `"browser"` exists | validator `:23` |
+| `sensitive` | no | B10: trace can carry tokens/PII → runner skips trace zips, omits screenshots from RCA, scrubs trace_signals, genericises error_message (`manifest.schema.json:40`) | validator `:26-28` (boolean) + `:43-45` (requires `redact_patterns` when true) |
+| `redact_patterns` | when `sensitive:true` | regexes scrubbed from trace_signals (network URLs + console); built-in token denylist applies regardless (`manifest.schema.json:45`) | validator `:29-41` (array-of-strings + each compiles as RegExp) |
+| `suggestedIntervalSeconds` | no | advisory cadence; real interval lives in SynthWatch DB | **nothing** (schema `:33` min-60 not executed) |
+| `tags` | no | dashboard filtering (inferred from use) | **nothing** |
+| `description` | no | human/dashboard copy | **nothing** (and one is stale — §1) |
+| `target` | no | the monitored origin | **nothing** — not even cross-checked against the URL the spec drives |
+| `enabledByDefault` | no | deliberate-enable posture; all 15 are `false` (`README.md:93-96`) | **nothing** |
+| `schemaVersion` | yes (schema) | format version | **nothing** — validator never reads it |
+
+**The headline gap: `manifest.schema.json` is executed by nothing.** The validator's own
+header claims "Validate manifest.json against the schema AND the filesystem"
+(`validate-manifest.mjs:2`), but the script never loads the schema file — it hand-rolls a
+subset of the checks (no ajv or any JSON-Schema library in `package.json:14-18`; CI runs
+only `validate:manifest`, `typecheck`, `test --list` — `.github/workflows/check.yml:32-37`).
+The `$schema` key (`manifest.json:2`) buys editor-side hints only. Falsification attempt:
+searched for any other consumer of `manifest.schema.json` — none in this repo; whether the
+*runner* validates against it is not observable from here (folded into Q2). Consequences
+of the gap, concretely:
+
+- `additionalProperties: false` (`manifest.schema.json:14`) is unenforced → a typo'd key
+  (`enabledbyDefault`, `redactPatterns`) ships silently as an ignored field.
+- `suggestedIntervalSeconds: 0`, a 500-char `name`, or `tags: "wegmans"` (string, not
+  array) would all pass CI.
+
+### The spec contract (what the runner assumes about script shape)
+
+- A spec is a standard `@playwright/test` file; each `test.step(...)` maps to a runner
+  `run_step` — step names are the dashboard funnel labels (`lib/flow.ts:5-9`), which is why
+  every spec wraps actions in the `step()` helper.
+- Imports must come from `../../lib/flow`: at runtime the runner esbuild-aliases that
+  import to its vendored `specfetch/specShim.ts`; the block between the
+  `>>> SHARED-WITH-RUNNER-SPECSHIM` / `<<<` markers (`lib/flow.ts:38-134` — `assertLoaded`,
+  the flow-modal exclusion, `dismissInterstitials`) is hash-checked by the *runner's* CI
+  (`scripts/check-libflow-parity.mjs` there; `lib/flow.ts:34-37` here). Editing inside the
+  markers without the runner-side mirror+SHA bump fails the runner's CI — a real
+  cross-repo coupling this repo's own CI does not see.
+- Execution config (timeouts, trace, UA, retries, locations) is runner-owned;
+  `playwright.config.ts` is local/CI-only (`playwright.config.ts:5-11`). **Notably absent
+  from the contract: any way for a spec to declare the wall-clock budget it needs** — the
+  cart spec needs ≫60 s worst-case (§2) and can only hope the runner's budget suffices.
+- Security posture: specs are trusted, reviewed code; they must only drive a browser
+  against the monitored target (`README.md:58-74`).
+
+---
+
+## 7. Coverage gaps + feature ideas
+
+Gap map only — journey *importance* ranking is Craig's call. Every "candidate" below is
+observable from artifacts already in the repo (a proven CTA, link, or API), not speculation
+about the sites.
+
+### Covered vs uncovered, per property
+
+**wegmans.com** (7 monitors) — covered: homepage smoke, search-results→product quick-view,
+search autocomplete, category browse (★unverified URL), recipe nav, recipe search
+(★unverified URL), store directory→detail.
+Observable gaps:
+- **List-add journey:** both product specs *prove* the "Add to List" CTA renders
+  (`search-product.spec.ts:89-92`, `shop-category-browse.spec.ts:76-79`) but no monitor
+  exercises adding to a list (anonymous-scope question applies).
+- **Store-selection journey:** store-locator proves "Set as my store" exists
+  (`store-locator.spec.ts:65-72`) but nothing monitors selecting a store and the site
+  honoring it — the capability the spec itself calls the gate for "pickup, Meals 2 Go
+  ordering" (`store-locator.spec.ts:8-9`).
+- **No wegmans.com cart** — the only cart monitor is on meals2go.com; wegmans.com shop
+  coverage stops at the quick-view dialog.
+- **Login/account** — absent by design until the allowlist lands (§5).
+
+**meals2go.com** (3 monitors) — covered: homepage bootstrap, anon menu browse, carryout
+add-to-cart (Buffalo/McKinley).
+Observable gaps:
+- **Fulfillment variants:** the cart spec hardcodes CARRY OUT (`spec:81-84`); the
+  fulfillment modal it drives offers other types (the carryout button is one of several
+  `#fulfillment-confirmation-confirm-button-*` affordances it selects among) — delivery/
+  shipping paths are unmonitored.
+- **Cart-remove/update:** explicitly un-reverse-engineered (`spec:22-24` — the real DELETE
+  shape is unknown); a remove journey is a known TODO if guest sessions ever persist.
+- **Order-capture path beyond cart:** the homepage recon observed `order-capture/*` APIs
+  firing (`meals2go-homepage.spec.ts:19`) — untouched by any monitor (and rightly gated on
+  policy: it approaches real order placement).
+- **Single-store assumption:** cart coverage exists only for McKinley; browse-menu pins
+  auto-selected store 16 (`meals2go-browse-menu.spec.ts:22-24`).
+
+**wegmansamore.com** (2 monitors) — covered: reservations widget wiring, menu PDF.
+Observable gaps: no homepage smoke (both specs deep-link to /reservations/ and /menus/; a
+homepage failure that breaks nav to them is invisible until it breaks those URLs).
+
+**wegmansnextdoor.com** (2 monitors) — covered: homepage location picker, **Rochester**
+reservations. Observable gaps:
+- **Astor Place reservations:** the homepage spec proves the Astor Place link renders
+  (`nextdoor-homepage.spec.ts:37-39`), but only Rochester's OpenTable widget (rid=2407) is
+  monitored — the second location's booking capability is a straight mirror away (its rid
+  needs recon).
+- **No menu monitor** — asymmetric with Amore, which has one.
+
+**synthwatch dashboard** (1 monitor) — homepage heading only; no deeper self-monitoring
+(e.g. a monitor-detail view). Kept minimal as the template, per its header.
+
+### Tech debt register
+
+| # | severity | debt | evidence |
+|---|---|---|---|
+| TD-1 | **Major** | `manifest.schema.json` executed by nothing: validator hand-rolls a subset; typo'd keys and invalid optional fields ship silently | §6; `validate-manifest.mjs:2,12`; `package.json:14-18`; `check.yml:32-37` |
+| TD-2 | **Major** (monitor-trust) | Two enabled-pending monitors have ★UNVERIFIED *entry URLs* — permanent-red risk on enable day (guaranteed false incidents) | `recipe-search.spec.ts:26-29`; `shop-category-browse.spec.ts:27-31`; README:88-96 acknowledges the class |
+| TD-3 | Major | Cart-spec wait arithmetic (~350 s worst; `CART_WAIT_MS`=60 s) vs the only declared budget (60 s), with no manifest field to communicate the needed budget to the runner | §2; `meals2go-cheese-pizza-cart.spec.ts:262`; `playwright.config.ts:16` |
+| TD-4 | Minor | Stale manifest description: cart entry still advertises self-clean removed in PR #37 | `manifest.json:35` vs spec:17-24 |
+| TD-5 | Minor | Reservation twin specs kept in sync by comment discipline instead of a shared factory | `nextdoor-reservations.spec.ts:9-11`; §3 |
+| TD-6 | Minor | 13 suppressed-catch boundary waits in GATE-B push failures to later, less-diagnostic gates | cart spec:94,110-116,126-131,145 |
+| TD-7 | Minor | Dead `lint` script: `eslint .` with no eslint dependency or config anywhere — `npm run lint` cannot succeed; CI doesn't call it | `package.json:9,14-18` |
+| TD-8 | Minor | Deprecated `noWaitAfter: true` (installed 1.61.1 types: "will default to `true` in the future") | cart spec:231 |
+| TD-9 | Minor | Naming drift: id prefixes (`meals2go-*` vs `wegmans-meals2go-*`), display names ("Meals2Go" vs "Meals 2 Go"), missing `wegmans` tag on two meals2go entries, meals2go specs under `monitors/wegmans/` | §1 |
+| TD-10 | Trivial | Unused `assertLoaded` import in homepage-load (strict tsc doesn't flag unused imports; no linter to catch it — see TD-7) | `homepage-load.spec.ts:1` |
+
+### Open questions
+
+- **Q1 (blocks §3):** Does the runner's esbuild aliasing tolerate a second `lib/*` module
+  (`lib/patterns.ts`), or is `lib/flow` the only import it resolves? (`lib/flow.ts:34-37`
+  documents only the flow alias.)
+- **Q2:** What is the runner's actual per-run wall-clock budget and retry policy? Needed to
+  judge TD-3, and to decide whether the manifest should grow a `timeoutSeconds`-style field.
+  Also: does the runner itself validate `manifest.schema.json` (softening TD-1) or is the
+  hand validator the only gate anywhere?
+- **Q3:** The two NULL-`spec_path` incidents (recipe-search, meals2go-browse-menu) left no
+  trace in any of this manifest's 8 revisions — confirm they were SynthWatch-DB-side, so
+  the structural guard for that class is tracked in the right repo.
+- **Q4:** Are the TD-2 unverified-URL monitors queued for a first-run verification pass
+  behind the allowlist work, or should they be verified some other sanctioned way before
+  anyone can enable them?
+- **Q5:** Are manifest `description` fields rendered in the dashboard? If yes, TD-4 is
+  user-visible copy, and `description` drift deserves a review-checklist line.
+- **Q6 (shapes the §5 checklist):** Which login is the target — a wegmans.com account
+  sign-in, meals2go, or both? The credential contract, redact patterns, and self-clean
+  design differ.
+- **Q7:** Is Astor Place reservations (rid unknown, needs recon) wanted as the
+  nextdoor-reservations mirror, and should Amore/Next Door coverage stay symmetric
+  (menu monitor asymmetry)?
