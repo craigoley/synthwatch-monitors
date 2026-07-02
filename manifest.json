@@ -169,6 +169,18 @@
       "target": "https://www.meals2go.com",
       "enabledByDefault": false,
       "sensitive": false
+    },
+    {
+      "id": "meals2go-catering-browse",
+      "name": "Meals 2 Go: browse a catering menu (anon)",
+      "script": "monitors/wegmans/meals2go-catering-browse.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["meals2go", "catering", "browse", "menu", "journey"],
+      "description": "Anonymous catering discovery journey: load meals2go.com/browse-catering/custom-cakes and assert the kitting menus API with catering=true returns 200 + item cards render. Distinct from meals2go-browse-menu by the catering=true backend surface (high-ticket catering funnel, untouched by the takeout browse). NEVER carts. Anonymous/accountless against a public page (no login, payment, or PII). Non-sensitive by decision: the guest session token is short-lived and protects nothing.",
+      "target": "https://www.meals2go.com",
+      "enabledByDefault": false,
+      "sensitive": false
     }
   ]
 }
