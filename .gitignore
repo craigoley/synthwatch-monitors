@@ -4,3 +4,9 @@ playwright-report/
 blob-report/
 .DS_Store
 *.log
+
+# Scratch probe scaffolding + analysis docs — session working files, NEVER committed to this public repo.
+# scratch/ holds the B2C login probes (b2c-login-probe / b2c-stealth-probe) that read B2C_TEST_USER/PASS
+# from env; a stray `git add -A` must never publish them. (These lost their ignore rule on a git reset once.)
+scratch/
+ANALYSIS-*.md
