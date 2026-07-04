@@ -56,3 +56,9 @@ scripts (monitors-as-code) that SynthWatch syncs and runs against production sit
   card" / "any ginger-sparkling product", assert a `/recipes/<cat>/<slug>` shape + an
   ingredients/directions section — not a named dish or SKU — so catalog reordering is selector-drift,
   not a false outage. *(from #29 + recipe-nav/search resilience notes)*
+- **Shared helpers go INSIDE the SHARED-WITH-RUNNER-SPECSHIM markers; a second lib/* module
+  (lib/patterns) will NOT resolve at runtime, by design.** The runner esbuild-aliases ONLY the
+  spec's `lib/flow` import to its vendored specShim; any other `lib/*` import compiles locally
+  but is dead at runtime. To add a shared helper: put it inside the markers in `lib/flow.ts`,
+  mirror it into the runner's `specfetch/specShim.ts`, and bump its LIBFLOW-VENDOR-SHA (the
+  runner's parity CI enforces this). *(from the 2026-07-04 runner recon session — verbatim)*

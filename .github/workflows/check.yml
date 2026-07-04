@@ -31,8 +31,22 @@ jobs:
         run: npx playwright install-deps || true
       - name: Validate manifest (JSON schema via ajv + registry <-> scripts in sync)
         run: npm run validate:manifest
+      - name: Fetch runner shim (live source of truth for implemented expect matchers)
+        # The shim single-sources its implemented matchers in SUPPORTED_MATCHERS
+        # (synthwatch@main runner/specfetch/specShim.ts, public repo). A failed fetch
+        # does NOT fail the job here — check-matchers falls back to the committed
+        # snapshot allowlist (restrictive, never allow-all) and warns LOUDLY.
+        run: |
+          if ! curl --fail -sSL --retry 3 --retry-delay 2 \
+              "https://raw.githubusercontent.com/craigoley/synthwatch/main/runner/specfetch/specShim.ts" \
+              -o "$RUNNER_TEMP/specShim.ts"; then
+            echo "::warning title=Matcher gate fallback::Could not fetch runner specShim.ts — the matcher gate will enforce the COMMITTED FALLBACK allowlist (restrictive, may lag the shim)."
+            rm -f "$RUNNER_TEMP/specShim.ts"
+          fi
       - name: Matcher allowlist + banned-pattern gate
         run: npm run check:matchers
+        env:
+          SHIM_SOURCE: ${{ runner.temp }}/specShim.ts
       - name: Typecheck
         run: npm run typecheck
       - name: Compile-check scripts (every spec parses + lists)

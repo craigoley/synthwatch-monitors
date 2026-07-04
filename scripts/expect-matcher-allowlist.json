@@ -1,15 +1,24 @@
 {
   "_comment": [
-    "Expect matchers a monitor spec is allowed to use.",
-    "WHY: the runner's spec shim implements a SUBSET of @playwright/test's expect matchers;",
-    "a spec using an unimplemented matcher passes local `npm run check` but fails AT RUNTIME",
-    "in the runner (the check-80 / toBeNull incident, 2026-06-29). This gate fails CI instead.",
-    "",
-    "★ SLOT — REPLACE WITH THE RUNNER'S IMPLEMENTED-MATCHER LIST: the values below are the",
-    "2026-07-04 census of what the fleet currently USES (5 matchers, 47 call sites), i.e. a",
-    "ratchet against NEW matchers sneaking in. When the runner session lands the shim's",
-    "actual implemented-matcher list, replace `allowed` with that list (it is the real",
-    "contract; this census is only its lower bound)."
+    "FAIL-CLOSED FALLBACK for the expect-matcher gate (scripts/check-matchers.mjs).",
+    "SOURCE OF TRUTH is the runner shim's SUPPORTED_MATCHERS array",
+    "(synthwatch@main runner/specfetch/specShim.ts) — CI fetches that file and parses it",
+    "live (SHIM_SOURCE). This committed snapshot is used ONLY when the fetch or parse",
+    "fails, with a loud warning; it is restrictive (never allow-all) and may lag the shim.",
+    "Snapshot of the shim's implemented set as of 2026-07-04 (11 matchers, runner recon).",
+    "Keep in sync opportunistically when the shim adds a matcher."
   ],
-  "allowed": ["toBe", "toBeGreaterThan", "toBeGreaterThanOrEqual", "toBeVisible", "toHaveURL"]
+  "allowed": [
+    "toBe",
+    "toBeDefined",
+    "toBeFalsy",
+    "toBeGreaterThan",
+    "toBeGreaterThanOrEqual",
+    "toBeLessThan",
+    "toBeLessThanOrEqual",
+    "toBeNull",
+    "toBeTruthy",
+    "toBeVisible",
+    "toHaveURL"
+  ]
 }
