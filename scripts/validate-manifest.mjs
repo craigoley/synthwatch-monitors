@@ -1,16 +1,33 @@
 #!/usr/bin/env node
 // Validate manifest.json against the schema AND the filesystem:
+//  - manifest.json validates against manifest.schema.json (ajv, draft-07) — this is
+//    what enforces additionalProperties:false (typo'd keys), name length, interval
+//    minimum, tag/redact_patterns types, and the sensitive→redact_patterns conditional
 //  - every manifest entry's `script` file must exist
 //  - every spec file under monitors/ must have a manifest entry (no orphans)
 //  - ids must be unique and match the id pattern
 // This CI gate keeps the registry honest: a script with no manifest entry won't
 // be discoverable; a manifest entry with no script would break sync.
+// (The hand-rolled checks below overlap the schema on purpose: they produce
+// friendlier per-monitor messages; the schema is the authoritative superset.)
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import Ajv from 'ajv';
 
 const root = process.cwd();
 const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
 const errors = [];
+
+// ★ Execute the schema for real. Before this, manifest.schema.json was referenced by
+// $schema (editor hints only) and nothing ran it — additionalProperties:false was decorative.
+const schema = JSON.parse(readFileSync(join(root, 'manifest.schema.json'), 'utf8'));
+const ajv = new Ajv({ allErrors: true, strict: false });
+const validateSchema = ajv.compile(schema);
+if (!validateSchema(manifest)) {
+  for (const e of validateSchema.errors ?? []) {
+    errors.push(`Schema violation at ${e.instancePath || '/'}: ${e.message}`);
+  }
+}
 
 const idPattern = /^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/;
 const seen = new Set();

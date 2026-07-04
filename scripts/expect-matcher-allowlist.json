@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Expect matchers a monitor spec is allowed to use.",
+    "WHY: the runner's spec shim implements a SUBSET of @playwright/test's expect matchers;",
+    "a spec using an unimplemented matcher passes local `npm run check` but fails AT RUNTIME",
+    "in the runner (the check-80 / toBeNull incident, 2026-06-29). This gate fails CI instead.",
+    "",
+    "★ SLOT — REPLACE WITH THE RUNNER'S IMPLEMENTED-MATCHER LIST: the values below are the",
+    "2026-07-04 census of what the fleet currently USES (5 matchers, 47 call sites), i.e. a",
+    "ratchet against NEW matchers sneaking in. When the runner session lands the shim's",
+    "actual implemented-matcher list, replace `allowed` with that list (it is the real",
+    "contract; this census is only its lower bound)."
+  ],
+  "allowed": ["toBe", "toBeGreaterThan", "toBeGreaterThanOrEqual", "toBeVisible", "toHaveURL"]
+}
