@@ -42,7 +42,12 @@ test('Wegmans: shop category browse -> first product', async ({ page }) => {
     const productCard = page
       .locator('a[href*="/shop/product/"]')
       .first();
-    await expect(productCard).toBeVisible({ timeout: 15000 });
+    await expect(
+      productCard,
+      'Wegmans shop category browse: no product cards rendered on /shop/search?category=beverages. ' +
+        'Suspect ENTRY-ROT first (the category-URL shape may have changed -- re-derive it from the ' +
+        'live /shop department UI) BEFORE concluding category browse is down.',
+    ).toBeVisible({ timeout: 15000 });
   });
 
   await step('open the first product', async () => {
