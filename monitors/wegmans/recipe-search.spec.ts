@@ -41,7 +41,12 @@ test('Wegmans: recipe search -> first chicken recipe', async ({ page }) => {
       .getByRole('link')
       .filter({ has: page.getByTestId('img-recipe-card') })
       .first();
-    await expect(recipeCard).toBeVisible({ timeout: 15000 });
+    await expect(
+      recipeCard,
+      'Wegmans recipe search: no recipe cards rendered on /recipes/search?query=chicken. Suspect ' +
+        'ENTRY-ROT first (the recipe-search URL shape may have changed -- re-derive it from the live ' +
+        '/recipes search UI) BEFORE concluding recipe search is down.',
+    ).toBeVisible({ timeout: 15000 });
   });
 
   await step('open the first chicken recipe', async () => {

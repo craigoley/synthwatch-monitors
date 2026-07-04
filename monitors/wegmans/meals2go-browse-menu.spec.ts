@@ -48,7 +48,9 @@ test('Meals2Go: browse a cuisine menu (anon)', async ({ page }) => {
     if (!menusResp) {
       throw new Error(
         `Meals2Go browse: the menus API (wegapi.azure-api.net/kitting/.../menus) did not return ` +
-          `200 within ${MENUS_WAIT_MS / 1000}s -- the menu discovery journey is broken (NEVER carts).`,
+          `200 within ${MENUS_WAIT_MS / 1000}s -- the menu discovery journey is broken, OR the entry ` +
+          `slug (/browse-menu/pizza-wings) has rotted. Suspect ENTRY-ROT first (re-derive a live slug ` +
+          `from meals2go.com/browse-menu) BEFORE concluding the menus backend is down. NEVER carts.`,
       );
     }
   });
