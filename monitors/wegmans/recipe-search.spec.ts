@@ -11,21 +11,15 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
  * independently. "Chicken" is chosen as a high-frequency, always-in-catalog query
  * that should always return results (resilient to seasonal/trending recipe changes).
  *
- * ★ PARTIALLY VERIFIED — the recipe detail assertions (URL pattern + ingredients/
- * directions text) are VERIFIED from recipe-nav.spec.ts. The recipe search input
- * and results-listing selectors are ★UNVERIFIED (recipe-nav navigates by category
- * tabs, not search). The recipe card selector (link wrapping img[data-testid=
- * "img-recipe-card"]) IS verified from recipe-nav and is reused here.
+ * Entry live-verified 2026-07-04 (enabled + passing in prod — check 220).
  *
- * ★DESIGN NOTE: navigates directly to /recipes/search/chicken rather than typing
+ * ★DESIGN NOTE: navigates directly to the search-results URL rather than typing
  * into a search box, applying the same flake-avoidance lesson as search-product
  * (direct URL = no autocomplete race).
  */
 test('Wegmans: recipe search -> first chicken recipe', async ({ page }) => {
   await step('open chicken recipe search results', async () => {
-    // ★UNVERIFIED URL structure: Wegmans recipe search likely uses /recipes/search?query=
-    // or /recipes/search/<term>. If neither works, the live run will reveal the correct
-    // pattern from the search UI's form action or XHR.
+    // Entry live-verified 2026-07-04 (enabled + passing in prod).
     await page.goto('https://www.wegmans.com/recipes/search?query=chicken', {
       waitUntil: 'domcontentloaded',
     });

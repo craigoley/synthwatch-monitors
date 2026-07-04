@@ -11,12 +11,7 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
  * by aisle/department, not search. If the department browse → product path breaks,
  * the main shopping experience is broken.
  *
- * ★UNVERIFIED — the /shop URL structure and product card selectors are extrapolated
- * from search-product.spec.ts (which proves a[href*="/shop/product/"] is the real
- * product card link pattern and "Add to List" is the detail CTA). Department/aisle
- * navigation selectors are ★UNVERIFIED and need a live run to confirm the real
- * category structure. "Beverages" is chosen because ginger sparkling water (from
- * the search spec) is a beverage, so the department demonstrably exists.
+ * Entry live-verified 2026-07-04 (enabled + passing in prod — check 197).
  *
  * ★DESIGN NOTE: navigates directly to /shop/search filtered by department rather
  * than clicking through department UI, applying the same flake-avoidance lesson as
@@ -24,10 +19,8 @@ import { test, expect, step, assertLoaded, dismissInterstitials } from '../../li
  */
 test('Wegmans: shop category browse -> first product', async ({ page }) => {
   await step('open the shop beverages category', async () => {
-    // ★UNVERIFIED URL structure: Wegmans shop likely supports category/department filtering.
-    // Direct URL navigation avoids any category-picker UI race (same pattern as search-product).
-    // If this URL doesn't resolve to a filtered product listing, the next step's product-card
-    // assertion will fail — the live run will reveal the correct URL structure.
+    // Entry live-verified 2026-07-04 (enabled + passing in prod). Direct URL navigation
+    // avoids any category-picker UI race (same pattern as search-product).
     await page.goto('https://www.wegmans.com/shop/search?category=beverages', {
       waitUntil: 'domcontentloaded',
     });
