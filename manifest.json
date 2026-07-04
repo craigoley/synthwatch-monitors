@@ -32,7 +32,7 @@
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
       "tags": ["meals2go", "ecommerce", "cart", "carryout", "journey"],
-      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item via the cart-items API, then self-clean by removing it. Cart-mutating but anonymous/accountless (no login, payment, or PII); self-cleans the added item. Non-sensitive by decision: the guest session token is short-lived and protects nothing.",
+      "description": "Recon-first carry-out cheese-pizza flow: establish CARRY OUT fulfillment (Buffalo, NY \u2192 McKinley store), open the takeout Pizza menu, add a cheese pizza to the cart, assert the line item via the cart-items API. Cart-mutating but anonymous/accountless (no login, payment, or PII); the guest cart is EPHEMERAL (fresh guest token per run, discarded with the browser context), so no self-clean is needed. Non-sensitive by decision: the guest session token is short-lived and protects nothing.",
       "target": "https://www.meals2go.com",
       "enabledByDefault": false,
       "sensitive": false
