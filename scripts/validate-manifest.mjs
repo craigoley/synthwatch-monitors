@@ -49,6 +49,14 @@ for (const m of manifest.monitors ?? []) {
     } else {
       for (const p of m.redact_patterns) {
         try {
+          // INTENTIONAL non-literal RegExp: `p` is a redact_pattern — a regex BY DESIGN (authored per
+          // monitor). Constructing it here is exactly how we validate it COMPILES, so a broken pattern is
+          // caught before a sensitive monitor ships. Do NOT "harden" this with escapeRegExp: escaping would
+          // make every string a valid literal, silently defeating this validation (an invalid regex like
+          // `[unclosed` would pass) and weakening the B10 redaction gate. detect-non-literal-regexp is a true
+          // false-positive here (unlike the dashboard's check-enum-coverage.mjs, where the interpolants are
+          // literal identifiers and ARE escaped — craigoley/synthwatch-dashboard#207).
+          // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- validating a by-design user regex; escaping would break the validation.
           new RegExp(p);
         } catch {
           errors.push(`Monitor ${m.id} redact_patterns: invalid regex ${JSON.stringify(p)}`);
