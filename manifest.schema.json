@@ -17,6 +17,13 @@
           "required": ["redact_patterns"],
           "properties": { "redact_patterns": { "minItems": 1 } }
         },
+        "allOf": [
+          {
+            "$comment": "Pre-prod-arc S3: rewrite_from_origin (the FROM origin) is meaningless without target (the TO/preview origin) to rewrite to. Mirrors the runner's reconcile.ts guard so the monitors ajv gate (#44) catches it before sync.",
+            "if": { "required": ["rewrite_from_origin"] },
+            "then": { "required": ["target"] }
+          }
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -34,6 +41,16 @@
           "tags": { "type": "array", "items": { "type": "string" } },
           "description": { "type": "string" },
           "target": { "type": "string" },
+          "environment": {
+            "type": "string",
+            "enum": ["prod", "staging", "dev"],
+            "description": "Pre-prod-arc S3 (mirrors checks.environment, migration 0059). Which environment this monitor targets. Omitted => 'prod' (the DB default). 'staging'/'dev' are EXCLUDED from the prod slo/mttr/trust rollups (API-side, #188) and INCLUDED in region-health/egress. GIT-authoritative: reconcile syncs it from here."
+          },
+          "rewrite_from_origin": {
+            "type": "string",
+            "pattern": "^https?://[^/]+$",
+            "description": "Pre-prod-arc S3 (mirrors checks.rewrite_from_origin, migration 0060). The FROM origin (scheme://host, no path). When this monitor reuses a PROD spec that hardcodes a prod origin, the runner rewrites requests from THIS origin to the check's `target` origin (the pre-prod/preview host) at runtime. REQUIRES `target` (the TO origin). Omitted => no rewrite (byte-identical to today). GIT-authoritative."
+          },
           "enabledByDefault": { "type": "boolean" },
           "sensitive": {
             "type": "boolean",
