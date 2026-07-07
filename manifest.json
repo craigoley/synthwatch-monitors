@@ -181,6 +181,25 @@
       "target": "https://www.meals2go.com",
       "enabledByDefault": false,
       "sensitive": false
+    },
+    {
+      "id": "wegmans-b2c-login-test",
+      "name": "Wegmans B2C login — InfoSec on-demand unblock test",
+      "script": "monitors/wegmans/b2c-login-test.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "b2c", "login", "auth", "infosec", "on-demand", "test-instrument", "disabled"],
+      "description": "★ InfoSec ON-DEMAND TEST INSTRUMENT (ships DISABLED; Craig fires it from the allowlisted egress) — NOT a cron health monitor. Logs into wegmans.com B2C (myaccount.wegmans.com, #signInName/#password → SelfAsserted, policy B2C_1A_…WithPhoneVerification) with the InfoSec-sanctioned Vercel bypass header as the Akamai+Vercel discriminator (allowlisted IP + header = past the bot wall). CLASSIFIES the outcome: COMPLETED / OTP_GATED / BOT_BLOCKED (Akamai blocked DESPITE header+allowlist — actionable) / INCONCLUSIVE_HEADER_DROPPED (header didn't ride the B2C nav — our bug) / OTHER. The header is injected host-scoped to myaccount.wegmans.com by the spec (the runner's PROTECTED_BYPASS_HOSTS omits that host — the runner gap the spec compensates for). sensitive=true: real test-account login; redact_patterns + the built-in denylist scrub Bearer/JWT/B2C-session values from trace_signals. Green only when the login COMPLETES.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "Bearer\\s+[A-Za-z0-9._~+/-]+=*",
+        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+",
+        "(x-ms-cpim-[A-Za-z0-9._-]+|AADB2C[A-Za-z0-9._-]*|csrf(_token)?=[^&\\s;]+)",
+        "(password|signInName)=[^&\\s]+"
+      ]
     }
   ]
 }
