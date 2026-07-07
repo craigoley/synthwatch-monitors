@@ -200,6 +200,20 @@
         "(x-ms-cpim-[A-Za-z0-9._-]+|AADB2C[A-Za-z0-9._-]*|csrf(_token)?=[^&\\s;]+)",
         "(password|signInName)=[^&\\s]+"
       ]
+    },
+    {
+      "id": "wegmans-search-product-preview",
+      "name": "Wegmans commerce PREVIEW: search → product (pre-prod regression)",
+      "script": "monitors/wegmans/search-product.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "commerce", "preview", "pre-prod", "regression", "search", "disabled"],
+      "description": "★ PRE-PROD REGRESSION CHECK (ships DISABLED; Craig enables after one verified-clean on-demand run from the allowlisted egress). REUSES the prod search-product spec unchanged (S2 host-rewrite, zero spec churn): the runner rewrites the spec's hardcoded rewrite_from_origin (https://www.wegmans.com) to this check's target origin (https://preview.commerce.wegmans.com) at the route layer, and injects the Vercel bypass header + x-vercel-set-bypass-cookie for the preview host (#215). environment=staging → EXCLUDED from prod slo/mttr/trust (API #188), INCLUDED in region-health/egress, so it can never pollute prod fleet numbers. ★ ROUTE-MISMATCH RISK (Craig-accepted): search-product targets the www.wegmans.com storefront app, not the commerce app — /shop/search may not exist on the commerce preview; a red here is expected until validated on-demand and is why it ships disabled. sensitive=false: anonymous search/browse, no login/Bearer/PII. Requires runner PRs #215 + #216 deployed before it runs.",
+      "target": "https://preview.commerce.wegmans.com",
+      "rewrite_from_origin": "https://www.wegmans.com",
+      "environment": "staging",
+      "enabledByDefault": false,
+      "sensitive": false
     }
   ]
 }
