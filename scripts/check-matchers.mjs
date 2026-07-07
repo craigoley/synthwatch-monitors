@@ -9,10 +9,15 @@
 //    SOURCE OF TRUTH (live): the shim single-sources its list in SUPPORTED_MATCHERS
 //    (synthwatch@main runner/specfetch/specShim.ts). CI fetches that file and this
 //    script parses the SUPPORTED_MATCHERS array from it (set SHIM_SOURCE=<path>).
-//    FAIL-CLOSED: if the fetch or parse fails we NEVER allow everything — we fall
-//    back to the committed snapshot in scripts/expect-matcher-allowlist.json
-//    (restrictive; may lag the shim) and print a LOUD warning so the fallback is
-//    visible in CI logs/annotations, not silent.
+//    FAIL-CLOSED, TWO REGIMES:
+//      - CI (SHIM_SOURCE set): the live shim is REQUIRED. If it can't be read or parsed
+//        (shim moved/renamed, structure changed), this script HARD-FAILS (exit 1) — it
+//        does NOT fall back to the snapshot. A silent fallback would let the allowlist
+//        drift out of sync with the shim forever (an undetected false-green). A
+//        transient network blip re-runs clean; a moved file must be fixed.
+//      - Local (SHIM_SOURCE unset, `npm run check`): no shim is fetched, so the
+//        committed snapshot in scripts/expect-matcher-allowlist.json is the intended
+//        source (restrictive; may lag the shim), used with a LOUD warning.
 //
 // 2) BANNED PATTERNS (mechanized CLAUDE.md):
 //    - page.waitForTimeout / waitUntil:'networkidle' — the fleet is hard-wait-free by
@@ -64,27 +69,54 @@ const LOUD = (msg) => {
   console.error('!'.repeat(78));
 };
 
+// The live shim's canonical URL (mirrors the fetch in .github/workflows/check.yml) —
+// named in hard-fail messages so a red run points straight at what to check/fix.
+const SHIM_URL =
+  'https://raw.githubusercontent.com/craigoley/synthwatch/main/runner/specfetch/specShim.ts';
+
+// HARD FAIL: print a loud, actionable error and exit non-zero so CI FAILS. Used only
+// when the live shim is REQUIRED (SHIM_SOURCE set — i.e. CI) but cannot be read/parsed.
+// Deliberately does NOT fall back to the snapshot: a silent fallback would let the
+// allowlist freeze on a stale snapshot and drift from the shim undetected (false-green).
+const DIE = (msg) => {
+  console.error(`::error title=Matcher gate: live shim required::${msg}`);
+  console.error('!'.repeat(78));
+  console.error(`!! MATCHER GATE HARD FAIL: ${msg}`);
+  console.error(`!! Failing CLOSED — NOT falling back to the committed snapshot.`);
+  console.error('!'.repeat(78));
+  process.exit(1);
+};
+
 let allow;
 let allowSource;
 const shimPath = process.env.SHIM_SOURCE;
-if (shimPath && existsSync(shimPath)) {
-  const parsed = parseSupportedMatchers(readFileSync(shimPath, 'utf8'));
-  if (parsed) {
-    allow = new Set(parsed);
-    allowSource = `live shim (${shimPath})`;
-  } else {
-    LOUD(`SUPPORTED_MATCHERS could not be parsed from ${shimPath} — the shim's structure may have changed.`);
-    allow = new Set(fallback);
-    allowSource = 'COMMITTED FALLBACK (live parse FAILED)';
+if (shimPath) {
+  // SHIM_SOURCE set = the live shim is REQUIRED (CI fetched it). It MUST exist and parse;
+  // a failure here means the fetch failed or the shim moved/renamed/changed shape.
+  if (!existsSync(shimPath)) {
+    DIE(
+      `SHIM_SOURCE=${shimPath} does not exist — the runner-shim fetch never produced the file. ` +
+        `The shim was probably moved or renamed in the runner repo; check ${SHIM_URL} and the ` +
+        `fetch step in .github/workflows/check.yml. Re-run if this was a transient network blip.`,
+    );
   }
+  const parsed = parseSupportedMatchers(readFileSync(shimPath, 'utf8'));
+  if (!parsed) {
+    DIE(
+      `SUPPORTED_MATCHERS could not be parsed from ${shimPath} — the shim's structure changed ` +
+        `(no parseable SUPPORTED_MATCHERS array, or it failed the sanity gate: must include ` +
+        `toBeVisible + toHaveURL and hold 5–40 matchers). Re-derive the parser against ${SHIM_URL}.`,
+    );
+  }
+  allow = new Set(parsed);
+  allowSource = `live shim (${shimPath})`;
 } else {
-  LOUD(
-    shimPath
-      ? `SHIM_SOURCE=${shimPath} does not exist — the runner-shim fetch failed.`
-      : 'SHIM_SOURCE not set — no live runner-shim source provided (expected in local runs; CI fetches it).',
-  );
+  // SHIM_SOURCE unset = local/dev run (`npm run check`): no shim is fetched, so the
+  // committed snapshot is the intended source. CI ALWAYS sets SHIM_SOURCE, so a failed
+  // CI fetch hard-fails above — it never lands in this fallback branch.
+  LOUD('SHIM_SOURCE not set — local run; enforcing the committed snapshot allowlist (CI sources it live).');
   allow = new Set(fallback);
-  allowSource = 'COMMITTED FALLBACK (no live shim source)';
+  allowSource = 'COMMITTED SNAPSHOT (local run, no live shim source)';
 }
 
 // JS built-ins that match the `.toXxx(` shape but are not expect matchers.
