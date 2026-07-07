@@ -1,10 +1,12 @@
 {
   "_comment": [
-    "FAIL-CLOSED FALLBACK for the expect-matcher gate (scripts/check-matchers.mjs).",
+    "LOCAL-RUN allowlist for the expect-matcher gate (scripts/check-matchers.mjs).",
     "SOURCE OF TRUTH is the runner shim's SUPPORTED_MATCHERS array",
     "(synthwatch@main runner/specfetch/specShim.ts) — CI fetches that file and parses it",
-    "live (SHIM_SOURCE). This committed snapshot is used ONLY when the fetch or parse",
-    "fails, with a loud warning; it is restrictive (never allow-all) and may lag the shim.",
+    "live (SHIM_SOURCE). This committed snapshot is the intended source ONLY for LOCAL runs",
+    "(npm run check, which does not fetch the shim), with a loud warning; it is restrictive",
+    "(never allow-all) and may lag the shim. In CI a fetch OR parse failure now HARD-FAILS",
+    "the job (it does NOT silently fall back here) so a moved/renamed shim surfaces loudly.",
     "Snapshot of the shim's implemented set as of 2026-07-04 (11 matchers, runner recon).",
     "Keep in sync opportunistically when the shim adds a matcher."
   ],

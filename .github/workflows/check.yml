@@ -34,14 +34,15 @@ jobs:
       - name: Fetch runner shim (live source of truth for implemented expect matchers)
         # The shim single-sources its implemented matchers in SUPPORTED_MATCHERS
         # (synthwatch@main runner/specfetch/specShim.ts, public repo). A failed fetch
-        # does NOT fail the job here — check-matchers falls back to the committed
-        # snapshot allowlist (restrictive, never allow-all) and warns LOUDLY.
+        # HARD-FAILS this job. Silently falling back to the committed snapshot (the old
+        # behavior) would let the allowlist drift out of sync with the shim INDEFINITELY
+        # with nobody noticing — a false-green. So if the shim moves/renames, the gate
+        # goes RED here loudly. A transient network blip is acceptable: re-run the job.
         run: |
-          if ! curl --fail -sSL --retry 3 --retry-delay 2 \
-              "https://raw.githubusercontent.com/craigoley/synthwatch/main/runner/specfetch/specShim.ts" \
-              -o "$RUNNER_TEMP/specShim.ts"; then
-            echo "::warning title=Matcher gate fallback::Could not fetch runner specShim.ts — the matcher gate will enforce the COMMITTED FALLBACK allowlist (restrictive, may lag the shim)."
-            rm -f "$RUNNER_TEMP/specShim.ts"
+          URL="https://raw.githubusercontent.com/craigoley/synthwatch/main/runner/specfetch/specShim.ts"
+          if ! curl --fail -sSL --retry 3 --retry-delay 2 "$URL" -o "$RUNNER_TEMP/specShim.ts"; then
+            echo "::error title=Matcher gate: runner shim fetch FAILED::Could not fetch the runner shim from $URL (curl --fail: HTTP error / 404). MOST LIKELY the shim moved or was renamed in the runner repo (runner/specfetch/specShim.ts) — update the URL above in .github/workflows/check.yml to match. If this is a transient network blip, re-run the job. Failing CLOSED (hard error) so the matcher allowlist can never silently freeze on the committed snapshot." >&2
+            exit 1
           fi
       - name: Matcher allowlist + banned-pattern gate
         run: npm run check:matchers
