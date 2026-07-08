@@ -131,4 +131,24 @@ export async function dismissInterstitials(page: Page): Promise<void> {
     }
   }
 }
+
+/**
+ * Per-monitor LOGIN CREDENTIAL accessor. A spec reads `credential('username')` instead of hardcoding an
+ * env-var name; the runner resolves the monitor's declared { role -> ENV_VAR_NAME } and publishes the value
+ * as process.env[SW_CRED_<ROLE>] for the life of this run (cleared after — see runner/loginCredentials.ts).
+ * Fail-CLOSED: an undeclared/unresolved role throws, so a mis-wired login monitor fails loudly instead of
+ * submitting an empty credential. IN THE PARITY-HASHED BLOCK on purpose — a security-relevant, spec-reachable
+ * accessor whose authoring (here) and runtime (specShim) copies must never silently drift. The env-var format
+ * `SW_CRED_<ROLE>` must stay in lockstep with runner/loginCredentials.ts credentialEnvKey.
+ */
+export function credential(role: string): string {
+  const value = process.env[`SW_CRED_${role.toUpperCase()}`];
+  if (value === undefined || value.length === 0) {
+    throw new Error(
+      `credential("${role}") is not available — the monitor must declare login_credentials.${role} ` +
+        `(role -> ENV_VAR_NAME) and that env var must be set on the runner`,
+    );
+  }
+  return value;
+}
 // <<< SHARED-WITH-RUNNER-SPECSHIM
