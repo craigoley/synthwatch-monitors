@@ -190,23 +190,40 @@ async function collectLabels(loc: Loc, scanCap: number, out: string[]): Promise<
   }
 }
 
+type DiagSituation = 'token-but-no-anchor' | 'timeout-no-terminal-signal';
+
 /**
- * ★ TELEMETRY (token-but-no-anchor OTHER; run #915736 was un-adjudicable without this): capture a
- * REDACTION-SAFE structural diagnostic so a future run self-diagnoses stale-selector (cause 1: login worked,
- * the anchor selector is wrong) vs real abort (cause 2: post-token redirect/interstitial/partial session) —
- * WITHOUT a trace zip, which a sensitive monitor never persists (the runner skips the failure zip + the
- * screenshot for sensitive; only redacted trace_signals/console survive). Everything captured is structure +
- * URL host/path + static selector strings + PII-filtered nav labels — NO page.content(), no input values, no
- * token values. Safe BY CONSTRUCTION; the runner redactor is the backstop. Emitted as one JSON console line →
- * lands in trace_signals.console (redacted).
+ * ★ TELEMETRY: capture a REDACTION-SAFE structural diagnostic for a non-COMPLETED terminal state so a
+ * future run self-diagnoses — WITHOUT a trace zip, which a sensitive monitor never persists (the runner
+ * skips the failure zip + the screenshot for sensitive; only redacted trace_signals/console survive).
+ * Two situations use it:
+ *   • 'token-but-no-anchor' (run #915736): stale anchor selector (cause 1, login worked) vs real post-token
+ *     abort (cause 2). The `accountAffordance` / `visibleControls` fields disambiguate.
+ *   • 'timeout-no-terminal-signal' (run #915902): no block/token/otp/creds-error fired in the budget → the
+ *     `challengePresent` / `spinnerPresent` / `signInFormPresent` fields show WHAT it was stuck on.
+ * Everything captured is structure + URL host/path + static selector strings + PII-filtered nav labels —
+ * NO page.content(), no input values, no token values. Safe BY CONSTRUCTION; the runner redactor is the
+ * backstop. Emitted as one JSON console line → lands in trace_signals.console (redacted).
  */
-async function captureTokenNoAnchorDiag(page: Page, tokenEventLoc: string, anchorDesc: string): Promise<string> {
+async function captureStructuralDiag(
+  page: Page,
+  situation: DiagSituation,
+  opts: { anchorDesc: string; tokenEvent?: string },
+): Promise<string> {
   const control = (rx: RegExp) => page.getByRole('link', { name: rx }).or(page.getByRole('button', { name: rx }));
 
   // PII-safe discriminators (booleans + host/path only):
   const signInFormPresent = await isVisibleSafe(page.locator('#signInName, #password'));
   const b2cErrorPresent = await isVisibleSafe(page.locator('.error.itemLevel, #claimVerificationServerError, .error.pageLevel'));
   const otpPresent = await isVisibleSafe(page.locator('#otpCode, input[id*="otp" i], #phoneVerificationControl'));
+  // A late/partial Akamai challenge (if it had rendered in time, blockByDom would have won the race first).
+  const challengePresent = await isVisibleSafe(
+    page.getByText(/access denied|pardon the interruption|reference #|unusual traffic|verify you are (a )?human|don'?t have permission|checking your browser/i),
+  );
+  // A stuck loading state (spinner still up at the budget → backend slow/hung after submit).
+  const spinnerPresent = await isVisibleSafe(
+    page.locator('[role="progressbar"], [aria-busy="true"], [class*="spinner" i], [class*="loading" i]'),
+  );
   const accountAffordance = await isVisibleSafe(control(/account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i));
   const navRegionPresent = await isVisibleSafe(page.getByRole('navigation'));
   const counts = {
@@ -222,18 +239,30 @@ async function captureTokenNoAnchorDiag(page: Page, tokenEventLoc: string, ancho
   await collectLabels(page.getByRole('button'), 16, visibleControls).catch(() => {});
 
   const likelyCause =
-    signInFormPresent || b2cErrorPresent
-      ? 'cause-2 (bounced to sign-in / B2C error → real partial-login, a genuine finding)'
-      : accountAffordance
-        ? 'cause-1 (logged-in chrome present under a different label → stale anchor selector, a spec fix)'
-        : 'undetermined (no sign-in form, no error, no recognized account affordance — read finalUrl + visibleControls)';
+    situation === 'token-but-no-anchor'
+      ? signInFormPresent || b2cErrorPresent
+        ? 'cause-2 (bounced to sign-in / B2C error → real partial-login, a genuine finding)'
+        : accountAffordance
+          ? 'cause-1 (logged-in chrome present under a different label → stale anchor selector, a spec fix)'
+          : 'undetermined (no sign-in form, no error, no recognized account affordance — read finalUrl + visibleControls)'
+      : challengePresent
+        ? 'stuck at an Akamai/challenge interstitial blockByDom did not match (bot wall — widen the challenge matcher)'
+        : spinnerPresent
+          ? 'stuck loading (spinner up at the budget — backend slow/hung after submit; no token, no error)'
+          : signInFormPresent
+            ? 'never advanced past the sign-in form (submit did not take / form re-rendered) — no token event fired'
+            : b2cErrorPresent
+              ? 'a B2C error is shown that credsRejected did not match (widen the error matcher)'
+              : otpPresent
+                ? 'an OTP/phone step is shown that the otp matcher did not match (widen the otp matcher)'
+                : 'undetermined (no form/error/challenge/spinner — blank or partial page; read finalUrl + visibleControls)';
 
   return JSON.stringify({
-    situation: 'token-but-no-anchor',
+    situation,
     finalUrl: safeLoc(page.url()),
-    tokenEvent: tokenEventLoc,
-    anchorsTried: [anchorDesc],
-    found: { signInFormPresent, b2cErrorPresent, otpPresent, accountAffordance, navRegionPresent, counts, visibleControls },
+    ...(opts.tokenEvent ? { tokenEvent: opts.tokenEvent } : {}),
+    anchorsTried: [opts.anchorDesc],
+    found: { signInFormPresent, b2cErrorPresent, otpPresent, challengePresent, spinnerPresent, accountAffordance, navRegionPresent, counts, visibleControls },
     likelyCause,
   });
 }
@@ -281,7 +310,7 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
       } catch {
         // ★ Token acquired but the anchor never rendered — the token-but-no-anchor OTHER (run #915736).
         // Capture a redaction-safe structural diagnostic so this is self-diagnosing next time.
-        const diag = await captureTokenNoAnchorDiag(page, tokenEventLoc, anchorDesc).catch(() => '');
+        const diag = await captureStructuralDiag(page, 'token-but-no-anchor', { anchorDesc, tokenEvent: tokenEventLoc }).catch(() => '');
         return {
           code: 'OTHER',
           detail: 'token event observed but no post-login anchor rendered (partial/aborted login)',
@@ -310,7 +339,15 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
   const timeoutSentinel = page
     .waitForResponse(() => false, { timeout: budgetMs })
     .then((): Verdict => ({ code: 'OTHER', detail: 'timeout' }))
-    .catch((): Verdict => ({ code: 'OTHER', detail: `no terminal signal within ${Math.round(budgetMs / 1000)}s (timeout)` }));
+    .catch(async (): Promise<Verdict> => {
+      // ★ Instrument the timeout (run #915902 signature): NO terminal signal fired in the budget → capture
+      // the stuck state structurally so a future timeout self-explains WHAT it was stuck on (a timeout with
+      // no token event is more consistent with a wall/interstitial than the token-but-no-anchor case).
+      const diag = await captureStructuralDiag(page, 'timeout-no-terminal-signal', {
+        anchorDesc: 'awaited: akamai-block | token-event+post-login-anchor | otp/phone | creds-error (none fired in budget)',
+      }).catch(() => '');
+      return { code: 'OTHER', detail: `no terminal signal within ${Math.round(budgetMs / 1000)}s (timeout)`, diag };
+    });
 
   return Promise.race([blockByNetwork, blockByDom, completed, otp, credsRejected, timeoutSentinel]);
 }
