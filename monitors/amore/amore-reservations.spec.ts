@@ -44,13 +44,12 @@ test('Amore: reservations OpenTable widget loads', async ({ page }) => {
     // ★ THE REAL CAPABILITY SIGNAL: the OpenTable widget loader request fired. If the embed
     // is gone or /reservations/ broke, this is null -> RED.
     const loaderReq = await loaderReqPromise;
-    if (!loaderReq) {
-      throw new Error(
-        `Amore reservations: the OpenTable widget loader request ` +
-          `(opentable.com/widget/reservation/loader) did NOT fire within ${LOADER_WAIT_MS / 1000}s -- ` +
-          `the booking embed is broken/removed or /reservations/ failed to load. (Never books; capability check only.)`,
-      );
-    }
+    expect(
+      loaderReq,
+      `Amore reservations: the OpenTable widget loader request ` +
+        `(opentable.com/widget/reservation/loader) did NOT fire within ${LOADER_WAIT_MS / 1000}s -- ` +
+        `the booking embed is broken/removed or /reservations/ failed to load. (Never books; capability check only.)`,
+    ).toBeTruthy();
   });
 
   await step('assert the reservations affordance rendered', async () => {

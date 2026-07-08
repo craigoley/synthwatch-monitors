@@ -58,13 +58,12 @@ test('Meals2Go: browse a catering menu (anon)', async ({ page }) => {
     // Signal 1 (network): the kitting menus API with catering=true returned 200. If the auto-selected
     // store's catering menu can't load, this is null -> RED. Store-agnostic (no hardcoded store id).
     const menusResp = await menusRespPromise;
-    if (!menusResp) {
-      throw new Error(
-        `Meals2Go catering browse: the catering menus API (wegapi.azure-api.net/kitting/.../menus?catering=true) ` +
-          `did not return 200 within ${MENUS_WAIT_MS / 1000}s -- the catering discovery journey is broken, ` +
-          `OR the entry slug (${ENTRY_URL}) has rotted (re-derive a live catering slug). NEVER carts.`,
-      );
-    }
+    expect(
+      menusResp,
+      `Meals2Go catering browse: the catering menus API (wegapi.azure-api.net/kitting/.../menus?catering=true) ` +
+        `did not return 200 within ${MENUS_WAIT_MS / 1000}s -- the catering discovery journey is broken, ` +
+        `OR the entry slug (${ENTRY_URL}) has rotted (re-derive a live catering slug). NEVER carts.`,
+    ).toBeTruthy();
   });
 
   await step('assert catering item cards rendered', async () => {

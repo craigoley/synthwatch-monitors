@@ -283,23 +283,25 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       // cart the POST populated (navigating to / would reset to a fresh empty guest cart).
       const addResp = await addRespPromise;
       page.off('request', onCartReq);
-      if (!addResp) {
-        const secs = CART_WAIT_MS / 1000;
-        throw new Error(
-          cartPostRequestSeen
-            ? `GATE-E: the cart-items POST fired but its response was not observed within ${secs}s — ` +
-              `likely a monitor/timing issue (the add probably succeeded); raise CART_WAIT_MS.`
-            : `GATE-E: no cart-items POST was attempted within ${secs}s — the add did not fire ` +
-              `(dead handler / wrong target / API contract change).`,
-        );
-      }
+      const secs = CART_WAIT_MS / 1000;
+      expect(
+        addResp,
+        cartPostRequestSeen
+          ? `GATE-E: the cart-items POST fired but its response was not observed within ${secs}s — ` +
+            `likely a monitor/timing issue (the add probably succeeded); raise CART_WAIT_MS.`
+          : `GATE-E: no cart-items POST was attempted within ${secs}s — the add did not fire ` +
+            `(dead handler / wrong target / API contract change).`,
+      ).toBeTruthy();
 
-      const status = addResp.status();
+      // toBeTruthy() above throws (ExpectationError → run 'fail' → red) when addResp is absent, so it is
+      // present here; narrow for TS (the house expect() is not an `asserts` guard, unlike the old if-throw).
+      const resp = addResp!;
+      const status = resp.status();
       type CartItem = { cartItemId?: string; quantity?: number };
       type CartBody = { cartId?: string; cartItems?: CartItem[] };
       let body: CartBody | null = null;
       try {
-        body = (await addResp.json()) as CartBody;
+        body = (await resp.json()) as CartBody;
       } catch {
         body = null;
       }

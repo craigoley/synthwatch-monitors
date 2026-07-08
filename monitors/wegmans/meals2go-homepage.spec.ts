@@ -53,13 +53,12 @@ test('Meals 2 Go: homepage loads', async ({ page }) => {
   await step('assert the homepage bootstrapped (first-party app-config API 200)', async () => {
     // THE MUST-GO-RED ANCHOR: the meals2go platform backend served the app's config bootstrap.
     const resp = await bootstrapRespPromise;
-    if (!resp) {
-      throw new Error(
-        `Meals 2 Go homepage: the first-party app-config bootstrap ` +
-          `(wegapi.azure-api.net/app-config/client/kv) did not return 200 within ${BOOTSTRAP_WAIT_MS / 1000}s — ` +
-          `the Meals 2 Go platform backend is down or the homepage failed to initialize.`,
-      );
-    }
+    expect(
+      resp,
+      `Meals 2 Go homepage: the first-party app-config bootstrap ` +
+        `(wegapi.azure-api.net/app-config/client/kv) did not return 200 within ${BOOTSTRAP_WAIT_MS / 1000}s — ` +
+        `the Meals 2 Go platform backend is down or the homepage failed to initialize.`,
+    ).toBeTruthy();
   });
 
   await step('assert the homepage rendered its ordering entry points', async () => {
