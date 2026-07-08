@@ -149,8 +149,97 @@ async function observeEgressIp(page: Page): Promise<string | null> {
   return null;
 }
 
+type Loc = ReturnType<Page['locator']>;
+
+/** Navigation-chrome labels that are UI text (NOT account PII) — safe to emit verbatim in the redacted
+ *  diagnostic. A logged-in affordance the anchor regex missed usually shows as one of these, which is
+ *  exactly what a future token-but-no-anchor OTHER needs to pinpoint the correct selector. */
+const SAFE_LABEL_ALLOWLIST = new Set([
+  'account', 'my account', 'your account', 'my wegmans', 'rewards', 'my rewards',
+  'sign out', 'log out', 'logout', 'sign in', 'log in', 'login', 'register',
+  'orders', 'my orders', 'order history', 'profile', 'my profile', 'settings',
+  'cart', 'shopping list', 'shopping lists', 'lists', 'shop', 'help', 'home',
+  'menu', 'search', 'store', 'stores', 'my store', 'checkout', 'favorites', 'reorder',
+]);
+
+/** Redact a control's label for the diagnostic. Greetings carry the account holder's name (PII the runner
+ *  redactor does NOT scrub — its declared patterns are token/session-only), so they are masked; known nav
+ *  labels pass through (UI chrome, not PII); anything else is structurally marked. Keeps the capture within
+ *  the audit-#219 invariant: DOM structure + URL + selector names, never account values. */
+function safeLabel(name: string): string {
+  const n = name.trim().replace(/\s+/g, ' ');
+  if (!n || n.length > 40) return n ? '‹control›' : '';
+  if (/^(hi|hello|hey|welcome|greetings|good (morning|afternoon|evening))\b/i.test(n)) return '‹greeting›';
+  return SAFE_LABEL_ALLOWLIST.has(n.toLowerCase()) ? n : '‹control›';
+}
+
+/** Best-effort visibility / count probes that never throw (bounded) — for the diagnostic capture. */
+async function isVisibleSafe(loc: Loc): Promise<boolean> {
+  try { return await loc.first().isVisible({ timeout: 1000 }); } catch { return false; }
+}
+async function countSafe(loc: Loc): Promise<number> {
+  try { return await loc.count(); } catch { return -1; }
+}
+async function collectLabels(loc: Loc, scanCap: number, out: string[]): Promise<void> {
+  const n = Math.min(await loc.count().catch(() => 0), scanCap);
+  for (let i = 0; i < n && out.length < 12; i++) {
+    const el = loc.nth(i);
+    if (!(await el.isVisible({ timeout: 200 }).catch(() => false))) continue;
+    const label = safeLabel(await el.innerText({ timeout: 200 }).catch(() => ''));
+    if (label && !out.includes(label)) out.push(label);
+  }
+}
+
+/**
+ * ★ TELEMETRY (token-but-no-anchor OTHER; run #915736 was un-adjudicable without this): capture a
+ * REDACTION-SAFE structural diagnostic so a future run self-diagnoses stale-selector (cause 1: login worked,
+ * the anchor selector is wrong) vs real abort (cause 2: post-token redirect/interstitial/partial session) —
+ * WITHOUT a trace zip, which a sensitive monitor never persists (the runner skips the failure zip + the
+ * screenshot for sensitive; only redacted trace_signals/console survive). Everything captured is structure +
+ * URL host/path + static selector strings + PII-filtered nav labels — NO page.content(), no input values, no
+ * token values. Safe BY CONSTRUCTION; the runner redactor is the backstop. Emitted as one JSON console line →
+ * lands in trace_signals.console (redacted).
+ */
+async function captureTokenNoAnchorDiag(page: Page, tokenEventLoc: string, anchorDesc: string): Promise<string> {
+  const control = (rx: RegExp) => page.getByRole('link', { name: rx }).or(page.getByRole('button', { name: rx }));
+
+  // PII-safe discriminators (booleans + host/path only):
+  const signInFormPresent = await isVisibleSafe(page.locator('#signInName, #password'));
+  const b2cErrorPresent = await isVisibleSafe(page.locator('.error.itemLevel, #claimVerificationServerError, .error.pageLevel'));
+  const otpPresent = await isVisibleSafe(page.locator('#otpCode, input[id*="otp" i], #phoneVerificationControl'));
+  const accountAffordance = await isVisibleSafe(control(/account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i));
+  const navRegionPresent = await isVisibleSafe(page.getByRole('navigation'));
+  const counts = {
+    links: await countSafe(page.getByRole('link')),
+    buttons: await countSafe(page.getByRole('button')),
+    forms: await countSafe(page.locator('form')),
+    inputs: await countSafe(page.locator('input')),
+  };
+  // The visible top-of-page control labels (PII-filtered) — a logged-in affordance the anchor regex missed
+  // (cause 1) usually surfaces here as a known nav label, telling the responder the RIGHT selector to use.
+  const visibleControls: string[] = [];
+  await collectLabels(page.getByRole('link'), 16, visibleControls).catch(() => {});
+  await collectLabels(page.getByRole('button'), 16, visibleControls).catch(() => {});
+
+  const likelyCause =
+    signInFormPresent || b2cErrorPresent
+      ? 'cause-2 (bounced to sign-in / B2C error → real partial-login, a genuine finding)'
+      : accountAffordance
+        ? 'cause-1 (logged-in chrome present under a different label → stale anchor selector, a spec fix)'
+        : 'undetermined (no sign-in form, no error, no recognized account affordance — read finalUrl + visibleControls)';
+
+  return JSON.stringify({
+    situation: 'token-but-no-anchor',
+    finalUrl: safeLoc(page.url()),
+    tokenEvent: tokenEventLoc,
+    anchorsTried: [anchorDesc],
+    found: { signInFormPresent, b2cErrorPresent, otpPresent, accountAffordance, navRegionPresent, counts, visibleControls },
+    likelyCause,
+  });
+}
+
 type Code = 'COMPLETED' | 'OTP_GATED' | 'BOT_BLOCKED' | 'INCONCLUSIVE_HEADER_DROPPED' | 'OTHER';
-type Verdict = { code: Code; detail: string };
+type Verdict = { code: Code; detail: string; diag?: string };
 
 /** A promise that never resolves — a losing branch in Promise.race (so a per-branch timeout does not
  *  win the race with a false negative; the timeoutSentinel is the sole guaranteed resolver). */
@@ -179,7 +268,9 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
 
   const completed = page
     .waitForResponse((r) => isTokenEvent(r.status(), r.url()), { timeout: budgetMs })
-    .then(async (): Promise<Verdict> => {
+    .then(async (tokenResp): Promise<Verdict> => {
+      const tokenEventLoc = safeLoc(tokenResp.url());
+      const anchorDesc = 'link|button name~/sign out|log out|my account|account|hi,/i';
       const anchor = page
         .getByRole('link', { name: /sign ?out|log ?out|my account/i })
         .or(page.getByRole('button', { name: /sign ?out|log ?out|account|hi,? /i }))
@@ -188,7 +279,14 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
         await anchor.waitFor({ state: 'visible', timeout: 15_000 });
         return { code: 'COMPLETED', detail: 'token acquired + authenticated DOM anchor on wegmans.com' };
       } catch {
-        return { code: 'OTHER', detail: 'token event observed but no post-login anchor rendered (partial/aborted login)' };
+        // ★ Token acquired but the anchor never rendered — the token-but-no-anchor OTHER (run #915736).
+        // Capture a redaction-safe structural diagnostic so this is self-diagnosing next time.
+        const diag = await captureTokenNoAnchorDiag(page, tokenEventLoc, anchorDesc).catch(() => '');
+        return {
+          code: 'OTHER',
+          detail: 'token event observed but no post-login anchor rendered (partial/aborted login)',
+          diag,
+        };
       }
     })
     .catch(() => never<Verdict>());
@@ -369,6 +467,14 @@ test('Wegmans B2C login — InfoSec on-demand unblock test', async ({ page }) =>
   // ---- Report: non-secret verdict to the console (survives trace_signals redaction; labels are not
   //      secrets), GREEN only on COMPLETED. All other outcomes go RED with the classification. --------
   console.log(`[b2c-login-test] OUTCOME=${verdict.code} :: ${verdict.detail}`);
+
+  // ★ Token-but-no-anchor OTHER: emit the redaction-safe structural diagnostic (finalUrl, token-event
+  //   host/path, anchors tried, and what rendered instead) as its own line → trace_signals.console
+  //   (runner-redacted). Closes the telemetry gap that made run #915736 un-adjudicable (stale selector
+  //   vs real abort). All fields are structure / host+path / PII-filtered labels — no secret values.
+  if (verdict.diag) {
+    console.log(`[b2c-login-test] OTHER-DIAG ${verdict.diag}`);
+  }
 
   if (verdict.code !== 'COMPLETED') {
     throw new Error(
