@@ -209,7 +209,7 @@ async function captureStructuralDiag(
   page: Page,
   situation: DiagSituation,
   opts: { anchorDesc: string; tokenEvent?: string },
-): Promise<string> {
+): Promise<{ full: string; compact: string }> {
   const control = (rx: RegExp) => page.getByRole('link', { name: rx }).or(page.getByRole('button', { name: rx }));
 
   // PII-safe discriminators (booleans + host/path only):
@@ -257,18 +257,50 @@ async function captureStructuralDiag(
                 ? 'an OTP/phone step is shown that the otp matcher did not match (widen the otp matcher)'
                 : 'undetermined (no form/error/challenge/spinner — blank or partial page; read finalUrl + visibleControls)';
 
-  return JSON.stringify({
+  const bit = (v: boolean) => (v ? '1' : '0');
+  const causeCode =
+    situation === 'token-but-no-anchor'
+      ? signInFormPresent || b2cErrorPresent
+        ? 'cause2-real-abort'
+        : accountAffordance
+          ? 'cause1-stale-selector'
+          : 'undetermined'
+      : challengePresent
+        ? 'stuck-challenge'
+        : spinnerPresent
+          ? 'stuck-spinner'
+          : signInFormPresent
+            ? 'stuck-signin'
+            : b2cErrorPresent
+              ? 'unmatched-error'
+              : otpPresent
+                ? 'unmatched-otp'
+                : 'undetermined';
+
+  const full = JSON.stringify({
     situation,
     finalUrl: safeLoc(page.url()),
     ...(opts.tokenEvent ? { tokenEvent: opts.tokenEvent } : {}),
     anchorsTried: [opts.anchorDesc],
     found: { signInFormPresent, b2cErrorPresent, otpPresent, challengePresent, spinnerPresent, accountAffordance, navRegionPresent, counts, visibleControls },
+    causeCode,
     likelyCause,
   });
+
+  // ★ A COMPACT (≤195-char) copy for the PERSISTED channels — both cap/scrub hard: the runner stores
+  // console text as text.slice(0,200) (extractConsole) and error_message via scrubError, so the full JSON
+  // would truncate. The compact carries the DISCRIMINATING fields (the account-affordance boolean +
+  // finalUrl + causeCode) that settle stale-selector vs real-abort. Structure/host-path/PII-filtered only.
+  const sit = situation === 'token-but-no-anchor' ? 'tok-no-anchor' : 'timeout';
+  const flags = `acct${bit(accountAffordance)}sgn${bit(signInFormPresent)}err${bit(b2cErrorPresent)}chal${bit(challengePresent)}spin${bit(spinnerPresent)}otp${bit(otpPresent)}nav${bit(navRegionPresent)}`;
+  const ctrls = visibleControls.slice(0, 3).join(',').slice(0, 40);
+  const compact = `[b2c OTHER-DIAG] ${sit} url=${safeLoc(page.url()).slice(0, 55)} f=${flags} c=[${ctrls}] ${causeCode}`.slice(0, 195);
+
+  return { full, compact };
 }
 
 type Code = 'COMPLETED' | 'OTP_GATED' | 'BOT_BLOCKED' | 'INCONCLUSIVE_HEADER_DROPPED' | 'OTHER';
-type Verdict = { code: Code; detail: string; diag?: string };
+type Verdict = { code: Code; detail: string; diag?: string; diagCompact?: string };
 
 /** A promise that never resolves — a losing branch in Promise.race (so a per-branch timeout does not
  *  win the race with a false negative; the timeoutSentinel is the sole guaranteed resolver). */
@@ -310,11 +342,12 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
       } catch {
         // ★ Token acquired but the anchor never rendered — the token-but-no-anchor OTHER (run #915736).
         // Capture a redaction-safe structural diagnostic so this is self-diagnosing next time.
-        const diag = await captureStructuralDiag(page, 'token-but-no-anchor', { anchorDesc, tokenEvent: tokenEventLoc }).catch(() => '');
+        const d = await captureStructuralDiag(page, 'token-but-no-anchor', { anchorDesc, tokenEvent: tokenEventLoc }).catch(() => ({ full: '', compact: '' }));
         return {
           code: 'OTHER',
           detail: 'token event observed but no post-login anchor rendered (partial/aborted login)',
-          diag,
+          diag: d.full,
+          diagCompact: d.compact,
         };
       }
     })
@@ -343,10 +376,10 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
       // ★ Instrument the timeout (run #915902 signature): NO terminal signal fired in the budget → capture
       // the stuck state structurally so a future timeout self-explains WHAT it was stuck on (a timeout with
       // no token event is more consistent with a wall/interstitial than the token-but-no-anchor case).
-      const diag = await captureStructuralDiag(page, 'timeout-no-terminal-signal', {
+      const d = await captureStructuralDiag(page, 'timeout-no-terminal-signal', {
         anchorDesc: 'awaited: akamai-block | token-event+post-login-anchor | otp/phone | creds-error (none fired in budget)',
-      }).catch(() => '');
-      return { code: 'OTHER', detail: `no terminal signal within ${Math.round(budgetMs / 1000)}s (timeout)`, diag };
+      }).catch(() => ({ full: '', compact: '' }));
+      return { code: 'OTHER', detail: `no terminal signal within ${Math.round(budgetMs / 1000)}s (timeout)`, diag: d.full, diagCompact: d.compact };
     });
 
   return Promise.race([blockByNetwork, blockByDom, completed, otp, credsRejected, timeoutSentinel]);
@@ -505,17 +538,29 @@ test('Wegmans B2C login — InfoSec on-demand unblock test', async ({ page }) =>
   //      secrets), GREEN only on COMPLETED. All other outcomes go RED with the classification. --------
   console.log(`[b2c-login-test] OUTCOME=${verdict.code} :: ${verdict.detail}`);
 
-  // ★ Token-but-no-anchor OTHER: emit the redaction-safe structural diagnostic (finalUrl, token-event
-  //   host/path, anchors tried, and what rendered instead) as its own line → trace_signals.console
-  //   (runner-redacted). Closes the telemetry gap that made run #915736 un-adjudicable (stale selector
-  //   vs real abort). All fields are structure / host+path / PII-filtered labels — no secret values.
+  // ★ EMIT THE OTHER-DIAG SO IT SURVIVES TO A PERSISTED CHANNEL (the #57/#58 survival bug fix).
+  //   Root cause: a spec `console.log` runs in the runner's NODE process — it is NOT a browser page
+  //   console event, so Playwright's trace never records it, so it can NEVER reach trace_signals.console
+  //   at any level (the runner's extractConsole reads PAGE console only, and drops non-error/warning).
+  //   Two persisted channels DO survive (both redacted by the runner), so we write the diag to both:
   if (verdict.diag) {
+    // (a) full JSON → Node stdout (runner/local logs; NOT the trace — deep-dive only).
     console.log(`[b2c-login-test] OTHER-DIAG ${verdict.diag}`);
+    // (b) COMPACT copy INTO THE PAGE console (a real browser console event at 'warning' level) → captured
+    //     by tracing → kept by extractConsole (error/warning) → trace_signals.console. Compact so the
+    //     text.slice(0,200) cap doesn't truncate the discriminating fields.
+    if (verdict.diagCompact) {
+      await page.evaluate((m) => console.warn(m), verdict.diagCompact).catch(() => {});
+    }
   }
 
   if (verdict.code !== 'COMPLETED') {
+    // (c) The COMPACT diag also rides the thrown Error → runs.error_message, which scrubError REDACTS
+    //     (keeps readable text; only genericises if nothing survives). This is the most robust channel
+    //     (a TEXT column, no 200-char cap) and needs no runner change. Compact keeps error_message readable.
+    const diagSuffix = verdict.diagCompact ? ` ${verdict.diagCompact}` : '';
     throw new Error(
-      `[b2c-login-test] OUTCOME=${verdict.code} — ${verdict.detail}. ` +
+      `[b2c-login-test] OUTCOME=${verdict.code} — ${verdict.detail}.${diagSuffix} ` +
         `(GREEN only when the login COMPLETES. BOT_BLOCKED = Akamai still blocking DESPITE the ` +
         `header+allowlist — actionable for InfoSec; OTP_GATED = wall cleared, OTP-gated; ` +
         `INCONCLUSIVE_HEADER_DROPPED = our injection bug, not a valid test; OTHER = see detail.)`,
