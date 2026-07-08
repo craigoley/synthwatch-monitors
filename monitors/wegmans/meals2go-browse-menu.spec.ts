@@ -45,14 +45,13 @@ test('Meals2Go: browse a cuisine menu (anon)', async ({ page }) => {
     // Signal 1 (network): the kitting menus API returned 200. If the default store's menu
     // can't load, this is null -> RED.
     const menusResp = await menusRespPromise;
-    if (!menusResp) {
-      throw new Error(
-        `Meals2Go browse: the menus API (wegapi.azure-api.net/kitting/.../menus) did not return ` +
-          `200 within ${MENUS_WAIT_MS / 1000}s -- the menu discovery journey is broken, OR the entry ` +
-          `slug (/browse-menu/pizza-wings) has rotted. Suspect ENTRY-ROT first (re-derive a live slug ` +
-          `from meals2go.com/browse-menu) BEFORE concluding the menus backend is down. NEVER carts.`,
-      );
-    }
+    expect(
+      menusResp,
+      `Meals2Go browse: the menus API (wegapi.azure-api.net/kitting/.../menus) did not return ` +
+        `200 within ${MENUS_WAIT_MS / 1000}s -- the menu discovery journey is broken, OR the entry ` +
+        `slug (/browse-menu/pizza-wings) has rotted. Suspect ENTRY-ROT first (re-derive a live slug ` +
+        `from meals2go.com/browse-menu) BEFORE concluding the menus backend is down. NEVER carts.`,
+    ).toBeTruthy();
   });
 
   await step('assert menu item cards rendered', async () => {

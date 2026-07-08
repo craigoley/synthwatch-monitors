@@ -51,13 +51,12 @@ test('Wegmans: search autocomplete suggestions', async ({ page }) => {
   await step('assert Algolia returned suggestions', async () => {
     // Signal 1 (network): the search-as-you-type query fired and returned 200.
     const queryResp = await queryRespPromise;
-    if (!queryResp) {
-      throw new Error(
-        `Wegmans autocomplete: typing "${QUERY}" did not produce a 200 from the Algolia ` +
-          `search-as-you-type query (algolia.net/1/indexes/*/queries) within ${QUERY_WAIT_MS / 1000}s -- ` +
-          `the typeahead backend is down or the search box is broken.`,
-      );
-    }
+    expect(
+      queryResp,
+      `Wegmans autocomplete: typing "${QUERY}" did not produce a 200 from the Algolia ` +
+        `search-as-you-type query (algolia.net/1/indexes/*/queries) within ${QUERY_WAIT_MS / 1000}s -- ` +
+        `the typeahead backend is down or the search box is broken.`,
+    ).toBeTruthy();
     // Signal 2 (DOM): the suggestions dropdown actually rendered an option.
     await expect(
       page.getByRole('option').first(),
