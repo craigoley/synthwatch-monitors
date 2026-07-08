@@ -193,6 +193,20 @@ async function collectLabels(loc: Loc, scanCap: number, out: string[]): Promise<
 type DiagSituation = 'token-but-no-anchor' | 'timeout-no-terminal-signal';
 
 /**
+ * ★ THE LOGGED-IN ACCOUNT AFFORDANCE — the post-login anchor AND the diag's `accountAffordance` probe both
+ * use this ONE selector, so the anchor is exactly what the diag proves matches on the authenticated page
+ * (run #916069 diag: acct1 = this matched, while the old narrower anchor missed → the stale-anchor OTHER).
+ * STRUCTURAL by construction: it matches a header LINK/BUTTON by accessible name (getByRole), not a
+ * getByText greeting text node — so a bare "Hi, <name>" text span does NOT match; only a real account
+ * control does. Regex-based (account/orders/profile/rewards/my-wegmans/sign-out + greeting-labelled account
+ * buttons), so it is stable ACROSS test accounts (no per-account literal). Present only on a logged-in
+ * header, and the completed branch is entered only after a real token event — so it stays must-go-red:
+ * a not-logged-in run has no such affordance (and a wrong-password run never reaches this branch). */
+const LOGGED_IN_AFFORDANCE_RX = /account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i;
+const loggedInAffordance = (page: Page) =>
+  page.getByRole('link', { name: LOGGED_IN_AFFORDANCE_RX }).or(page.getByRole('button', { name: LOGGED_IN_AFFORDANCE_RX }));
+
+/**
  * ★ TELEMETRY: capture a REDACTION-SAFE structural diagnostic for a non-COMPLETED terminal state so a
  * future run self-diagnoses — WITHOUT a trace zip, which a sensitive monitor never persists (the runner
  * skips the failure zip + the screenshot for sensitive; only redacted trace_signals/console survive).
@@ -210,8 +224,6 @@ async function captureStructuralDiag(
   situation: DiagSituation,
   opts: { anchorDesc: string; tokenEvent?: string },
 ): Promise<{ full: string; compact: string }> {
-  const control = (rx: RegExp) => page.getByRole('link', { name: rx }).or(page.getByRole('button', { name: rx }));
-
   // PII-safe discriminators (booleans + host/path only):
   const signInFormPresent = await isVisibleSafe(page.locator('#signInName, #password'));
   const b2cErrorPresent = await isVisibleSafe(page.locator('.error.itemLevel, #claimVerificationServerError, .error.pageLevel'));
@@ -224,7 +236,7 @@ async function captureStructuralDiag(
   const spinnerPresent = await isVisibleSafe(
     page.locator('[role="progressbar"], [aria-busy="true"], [class*="spinner" i], [class*="loading" i]'),
   );
-  const accountAffordance = await isVisibleSafe(control(/account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i));
+  const accountAffordance = await isVisibleSafe(loggedInAffordance(page));
   const navRegionPresent = await isVisibleSafe(page.getByRole('navigation'));
   const counts = {
     links: await countSafe(page.getByRole('link')),
@@ -331,11 +343,12 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
     .waitForResponse((r) => isTokenEvent(r.status(), r.url()), { timeout: budgetMs })
     .then(async (tokenResp): Promise<Verdict> => {
       const tokenEventLoc = safeLoc(tokenResp.url());
-      const anchorDesc = 'link|button name~/sign out|log out|my account|account|hi,/i';
-      const anchor = page
-        .getByRole('link', { name: /sign ?out|log ?out|my account/i })
-        .or(page.getByRole('button', { name: /sign ?out|log ?out|account|hi,? /i }))
-        .first();
+      // ★ Post-login anchor = the diag's proven accountAffordance selector (loggedInAffordance): the
+      // stale-anchor OTHER (run #916069) showed acct1 — this selector matched the authenticated header
+      // while the old narrower one (/sign out|log out|my account/) missed. One-anchor fix; must-go-red
+      // holds (present only on a logged-in header, reached only after a real token event).
+      const anchorDesc = 'link|button name~/account|profile|orders|my wegmans|rewards|sign out|log out|hello|welcome/i (diag accountAffordance selector)';
+      const anchor = loggedInAffordance(page).first();
       try {
         await anchor.waitFor({ state: 'visible', timeout: 15_000 });
         return { code: 'COMPLETED', detail: 'token acquired + authenticated DOM anchor on wegmans.com' };
