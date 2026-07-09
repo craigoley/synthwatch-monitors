@@ -127,17 +127,21 @@ async function collectLabels(loc: Loc, scanCap: number, out: string[]): Promise<
 const loggedInAffordance = (page: Page) =>
   page.getByRole('link', { name: LOGGED_IN_AFFORDANCE_RX }).or(page.getByRole('button', { name: LOGGED_IN_AFFORDANCE_RX }));
 
-// ── Add-to-cart transform confirmation (this PR) ─────────────────────────────────────────────────────
-// GROUND TRUTH (Craig's screenshots of the real wegmans.com/shop add-to-cart interaction — DEFINITIVE):
-// add-to-cart is a SINGLE CLICK. On a PDP the "Add to Cart" button TRANSFORMS IN PLACE into a quantity
-// stepper — [remove/trash] [qty e.g. "1"] [+] — and on search results the "+" circle becomes a filled
-// "1". Same control, NO modal/dialog. That in-place transform IS the success confirmation. The prior
-// ADD-DIAG's `dlg1` "dialog seen" reading was a FALSE POSITIVE — it misread the transformed stepper as a
-// modal (there is no add-to-cart dialog). The earlier `cw0` (zero cart-writes observed at /shop/cart)
-// came from the flow moving on to the cart before the write flushed server-side. So this step now: clicks
-// ONCE, ARMS ON the stepper transform as the positive signal, THEN lets the cart-write settle (network
-// event / badge increment) before advancing. All captured evidence is DOM structure / URL host+path /
-// booleans — never creds, token, or page HTML.
+// ── Add-to-cart — CLICK-STRATEGY LADDER with full telemetry (this PR) ─────────────────────────────────
+// GROUND TRUTH (Craig confirms add-to-cart works MANUALLY on the real wegmans.com/shop buy-box button):
+// this is a PLAYWRIGHT SCRIPTING problem — the flow clicks the CORRECT button (the MAIN buy-box
+// `component--add-to-cart-or-order-button-view` control, DISTINCT from a recommended item's
+// `component--add-to-cart-mini-form` "add to list" mini button) but the React onClick does not fire, so
+// nothing commits (stepper0/cw0 across every prior fire; wrong-button, wrong-page, coordinate-fidelity,
+// overlay-interception, JS errors, login/store all RULED OUT). Success signal (Craig's screenshots): the
+// "Add to Cart" button TRANSFORMS IN PLACE into a quantity stepper ([remove/trash] [qty] [+]); a
+// first-party cart-WRITE (POST/PUT to a cart/basket/item/order path) is the transform-independent commit.
+// Highest-probability cause: React HYDRATION TIMING — the click lands after the button paints but before
+// React wires onClick. Rather than guess ONE click method, addToCartLadder tries a LADDER of strategies
+// (hydrate+locator → precise-center → raw-pointer → dispatch-events → force), STOPS at the first that
+// commits (records which), and on TOTAL failure emits the full per-rung telemetry — reactHandler/hydration
+// state, click result, transform, cart-write — so the fire is maximally diagnostic. All evidence is DOM
+// structure / URL host+path / booleans — never creds, token, or page HTML.
 
 /** Armed visibility probe for the post-click DOM delta — resolves true if the locator becomes visible
  *  within ms, false otherwise. NOT a hard wait: it is an awaited waitFor that returns as soon as it
@@ -203,25 +207,259 @@ async function readAddButtonState(
     .catch(() => null);
 }
 
-/** ★ ACTIONABILITY-CHECKED add-to-cart click (this PR). Playwright's locator.click() performs full
- *  actionability: it scrolls the button into view, waits for it to be stable and to RECEIVE pointer
- *  events, and THROWS a descriptive error NAMING the intercepting element if an overlay covers the
- *  button. This REPLACES the prior raw `page.mouse.move/down/up` at the button's center (trace 925765/
- *  926857): a raw-coordinate click hits whatever is TOPMOST at that point with NO interception check, so
- *  the fixed emplifi chat overlay sitting over the button silently ate the click (real mouse event, pill
- *  button matched, yet stepper0/cw0 — zero cart-write). Switching back to the actionability-checked
- *  locator click turns interception from a SILENT MISS into a LOUD, NAMED error → the diag shows exactly
- *  which overlay to dismiss next (or the click lands and commits, if dismissChatWidget cleared it).
- *  Returns {method,err}: 'locator' on a clean click; 'failed' with the Playwright message (which names
- *  the intercepting element on an actionability failure) so the ADD diag/error surfaces it. Never throws. */
-async function actionabilityClick(loc: Loc): Promise<{ method: 'locator' | 'failed'; err: string | null }> {
-  const target = loc.first();
-  await target.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+/** ★ REACT-HANDLER / HYDRATION PROBE. Walks the element + up to 6 ancestors for React's internal props
+ *  bag (`__reactProps$…` on React 17+, `__reactEventHandlers$…` on 16) and reports whether it carries a
+ *  click-family handler (onClick/onPointerDown/onMouseDown). Directly tests the TOP hypothesis: if no
+ *  handler is attached, the button painted but React has not wired onClick yet (hydration timing) → a
+ *  click cannot commit. Structure only — never reads prop VALUES / PII. Null-safe (returns handler:false). */
+async function readReactHandler(loc: Loc): Promise<{ handler: boolean; where: string; on: string }> {
+  return loc
+    .first()
+    .evaluate((el) => {
+      let cur: Element | null = el as Element;
+      let depth = 0;
+      while (cur && depth < 6) {
+        const key = Object.keys(cur).find((k) => k.startsWith('__reactProps$') || k.startsWith('__reactEventHandlers$'));
+        if (key) {
+          const props = (cur as unknown as Record<string, any>)[key];
+          if (props) {
+            const on = ['onClick', 'onClickCapture', 'onPointerDown', 'onMouseDown'].filter((h) => typeof props[h] === 'function');
+            if (on.length) return { handler: true, where: `d${depth}`, on: on.join('+').slice(0, 40) };
+          }
+        }
+        cur = cur.parentElement;
+        depth++;
+      }
+      return { handler: false, where: 'none', on: '' };
+    })
+    .catch(() => ({ handler: false, where: 'err', on: '' }));
+}
+
+/** Armed hydration wait: poll (bounded, NOT a fixed sleep) until the button gains a React click handler,
+ *  then return. Resolves early the instant the handler is detected; otherwise returns after ms. No-op if
+ *  the element handle can't be taken. This is the "give hydration time, then re-check" step. */
+async function waitForReactHandler(page: Page, loc: Loc, ms: number): Promise<void> {
+  const handle = await loc.first().elementHandle().catch(() => null);
+  if (!handle) return;
+  await page
+    .waitForFunction(
+      (el: Element) => {
+        let cur: Element | null = el;
+        let depth = 0;
+        while (cur && depth < 6) {
+          const key = Object.keys(cur).find((k) => k.startsWith('__reactProps$') || k.startsWith('__reactEventHandlers$'));
+          if (key) {
+            const props = (cur as unknown as Record<string, any>)[key];
+            if (props && (typeof props.onClick === 'function' || typeof props.onPointerDown === 'function' || typeof props.onMouseDown === 'function')) return true;
+          }
+          cur = cur.parentElement;
+          depth++;
+        }
+        return false;
+      },
+      handle,
+      { timeout: ms, polling: 150 },
+    )
+    .catch(() => {});
+  await handle.dispose().catch(() => {});
+}
+
+/** Which add-to-cart container the matched button belongs to — the DEFINITIVE recon (b) confirmation that
+ *  the ladder acts on the MAIN buy-box button (`component--add-to-cart-or-order-button-view`) and NOT a
+ *  recommended-item "add to list" mini control (`component--add-to-cart-mini-form`). Structural only. */
+async function readAddContainer(loc: Loc): Promise<string> {
+  return loc
+    .first()
+    .evaluate((el) => {
+      if (el.closest('.component--add-to-cart-or-order-button-view')) return 'buy-box';
+      if (el.closest('.component--add-to-cart-mini-form')) return 'mini-form';
+      const near = el.closest('[class*="add-to-cart" i]') as HTMLElement | null;
+      return 'other[' + (near?.getAttribute('class') || '').slice(0, 40) + ']';
+    })
+    .catch(() => 'unread');
+}
+
+/** True if a response is a wegmans/wegapi cart-WRITE (non-GET to a cart/basket/item/order/add path,
+ *  status < 500) — the DEFINITIVE commit signal, independent of the UI transform. */
+function isCartWrite(method: string, url: string, status: number): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  let host = '';
   try {
-    await target.click({ timeout: 8000 });
-    return { method: 'locator', err: null };
-  } catch (e) {
-    return { method: 'failed', err: e instanceof Error ? e.message : String(e) };
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return false;
+  }
+  const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+  return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(url) && status < 500;
+}
+
+/** ★ ADD-TO-CART CLICK-STRATEGY LADDER (this PR). Craig confirms add-to-cart works MANUALLY on the buy-box
+ *  button, so this is a Playwright scripting problem: the correct button is clicked but its React onClick
+ *  doesn't fire. Instead of guessing one method, try a LADDER — first-commit-wins, full telemetry on
+ *  failure — while capturing the reactHandler/hydration state and a definitive cart-write signal.
+ *
+ *  PRE-CLICK (once): button state/box/aria + which container + reactHandler + page readiness + cart badge.
+ *  CART-WRITE LISTENER (attached BEFORE the first rung): records every cart-write and the rung it fired on.
+ *  RUNGS (each: attempt → armed wait ≤ARM_MS for the stepper transform OR a cart-write → commit/record | next):
+ *    1 hydrate+locator  – bounded readiness settle, re-check handler, normal actionability locator click.
+ *    2 precise-center   – locator click at the BUTTON's geometric center (not a child svg/span).
+ *    3 raw-pointer      – page.mouse pointerdown→up at the bbox center (a genuine trusted pointer).
+ *    4 dispatch-events  – page.evaluate dispatch pointerdown/mousedown/mouseup/click + el.click().
+ *    5 force            – locator click {force:true}, last resort (skips actionability).
+ *  If reactHandler is not yet wired at a rung, an ARMED hydration wait precedes it (the hydration case may
+ *  just need time). SUCCESS = the first rung whose stepper transform appears OR whose cart-write fires;
+ *  the ladder stops there. Throws (with the full ladder map) ONLY if EVERY rung fails, so the fire is
+ *  maximally diagnostic. All telemetry is DOM structure / URL host+path / booleans — never creds/token/PII. */
+async function addToCartLadder(page: Page, item: string, addToCart: Loc, addToCartMatches: Loc): Promise<void> {
+  const RUNG_CLICK_TIMEOUT = 2200;
+  const ARM_MS = 1800;
+  const HYDRATE_MS = 1500;
+
+  // ── PRE-CLICK TELEMETRY (once, before the ladder) ──
+  const matchCount = await addToCartMatches.count().catch(() => -1);
+  const visMatchCount = await addToCartMatches.filter({ visible: true }).count().catch(() => -1);
+  const btn = await readAddButtonState(addToCart); // disabled/aria-*/on-screen/box/class
+  const container = await readAddContainer(addToCart); // recon (b): buy-box vs mini-form
+  const rh0 = await readReactHandler(addToCart); // ★ hydration hypothesis, at start
+  const readyState = await page.evaluate(() => document.readyState).catch(() => '?');
+  const netIdle = await page.waitForLoadState('networkidle', { timeout: HYDRATE_MS }).then(() => true).catch(() => false);
+  const cartBefore = await readCartCount(page);
+
+  // ── CART-WRITE LISTENER (attach BEFORE the first click strategy) — the transform-independent commit ──
+  const cartWrites: { rung: number; loc: string }[] = [];
+  let currentRung = 0;
+  const onResponse = (resp: any) => {
+    try {
+      if (isCartWrite(resp.request().method(), resp.url(), resp.status())) {
+        cartWrites.push({ rung: currentRung, loc: safeLoc(resp.url()) });
+      }
+    } catch {
+      /* never let telemetry break the flow */
+    }
+  };
+  page.on('response', onResponse);
+
+  // The in-place stepper transform is the UI success signal (same locator the prior single-click armed on).
+  const stepper = page
+    .locator('[class*="stepper" i], [class*="quantity" i], [data-testid*="quantity" i]')
+    .or(page.getByRole('button', { name: /^\s*[-+]\s*$|increase|decrease|increment|decrement|quantity|remove|delete/i }))
+    .or(page.getByRole('spinbutton'));
+
+  type Rung = { name: string; run: () => Promise<void> };
+  const rungs: Rung[] = [
+    {
+      name: 'hydrate+locator',
+      run: async () => {
+        await page.waitForLoadState('networkidle', { timeout: HYDRATE_MS }).catch(() => {});
+        await addToCart.first().scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+        await addToCart.first().click({ timeout: RUNG_CLICK_TIMEOUT });
+      },
+    },
+    {
+      name: 'precise-center',
+      run: async () => {
+        const box = await addToCart.first().boundingBox();
+        if (!box) throw new Error('precise-center: no bounding box');
+        await addToCart.first().click({ position: { x: box.width / 2, y: box.height / 2 }, timeout: RUNG_CLICK_TIMEOUT });
+      },
+    },
+    {
+      name: 'raw-pointer',
+      run: async () => {
+        const box = await addToCart.first().boundingBox();
+        if (!box) throw new Error('raw-pointer: no bounding box');
+        await addToCart.first().scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.up();
+      },
+    },
+    {
+      name: 'dispatch-events',
+      run: async () => {
+        await addToCart.first().evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          const opts: any = { bubbles: true, cancelable: true, composed: true, button: 0, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+          (el as HTMLElement).click();
+        });
+      },
+    },
+    {
+      name: 'force',
+      run: async () => {
+        await addToCart.first().click({ force: true, timeout: RUNG_CLICK_TIMEOUT });
+      },
+    },
+  ];
+
+  const rungLines: string[] = [];
+  let committedRung = 0;
+  let committedVia = '';
+  for (let i = 0; i < rungs.length; i++) {
+    currentRung = i + 1;
+    // Re-check the handler at THIS rung; if still unwired, do an ARMED hydration wait (the top hypothesis
+    // is the click lands before React wires onClick — give it bounded time, then re-check) and click.
+    let rh = await readReactHandler(addToCart);
+    if (!rh.handler) {
+      await waitForReactHandler(page, addToCart, HYDRATE_MS);
+      rh = await readReactHandler(addToCart);
+    }
+    const writesBefore = cartWrites.length;
+    let clicked = 'ok';
+    try {
+      await rungs[i].run();
+    } catch (e) {
+      clicked = 'err:' + (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').slice(0, 110);
+    }
+    // Armed wait ≤ARM_MS for EITHER success signal (no hard sleep): the stepper transform (appearsWithin
+    // resolves the instant it is visible) OR a cart-write recorded by the listener during this window.
+    const stepperSeen = await appearsWithin(stepper, ARM_MS);
+    const cartWriteSeen = cartWrites.length > writesBefore;
+    const cartNow = await readCartCount(page);
+    rungLines.push(
+      `rung=${i + 1} strategy=${rungs[i].name} reactHandler=${rh.handler ? 'y' : 'n'}(${rh.where}${rh.on ? ':' + rh.on : ''}) ` +
+        `clicked=${clicked} transform=${stepperSeen ? 'y' : 'n'} cartWrite=${cartWriteSeen ? 'y' : 'n'} cart=${cartBefore ?? '?'}->${cartNow ?? '?'}`,
+    );
+    if (stepperSeen || cartWriteSeen) {
+      committedRung = i + 1;
+      committedVia = rungs[i].name;
+      break;
+    }
+  }
+
+  page.off('response', onResponse);
+
+  const cartAfter = await readCartCount(page);
+  const btnStr = btn
+    ? `dis${btn.dis ? 1 : 0}/aDis${btn.ariaDis ?? '-'}/aHid${btn.ariaHid ?? '-'}/on${btn.onScreen ? 1 : 0}/box${btn.box}/aria[${btn.aria}]`
+    : 'unread';
+  const summary =
+    `ATC-RESULT ${item} committed=${committedRung ? 'rung' + committedRung : 'NONE'} via=${committedVia || '-'} ` +
+    `cartWrites=${cartWrites.length} reactHandlerAtStart=${rh0.handler ? 'y' : 'n'} container=${container} ` +
+    `match=${matchCount}(vis${visMatchCount}) ready=${readyState}/netIdle${netIdle ? 'y' : 'n'} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'}`;
+
+  // Emit EVERY rung line + the summary to BOTH Node stdout (deep-dive) and trace_signals.console.
+  for (const line of rungLines) {
+    const l = `[full-shop-flow] ATC-LADDER ${item} ${line}`;
+    console.log(l);
+    await page.evaluate((m) => console.warn(m), l.slice(0, 195)).catch(() => {});
+  }
+  console.log(`[full-shop-flow] ${summary}`);
+  await page.evaluate((m) => console.warn(m), summary.slice(0, 195)).catch(() => {});
+
+  if (!committedRung) {
+    throw new Error(
+      `[full-shop-flow] ${summary} :: btn={${btnStr}} :: RUNGS=[ ${rungLines.join(' | ')} ] :: ` +
+        `add-${item} did NOT commit on ANY of ${rungs.length} click strategies — no stepper transform and no ` +
+        `cart-write fired across the whole ladder. reactHandler=n throughout ⇒ HYDRATION (onClick never wired; ` +
+        `needs a different readiness gate). reactHandler=y with zero cart-writes ⇒ NO standard click triggers the ` +
+        `handler (rules out the click-method family — redirect the investigation).`,
+    );
   }
 }
 
@@ -560,112 +798,22 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         }
         await expect(addToCart, `add-${item}: Add to Cart affordance not found (NET-NEW selector — verify from diag)`).toBeVisible({ timeout: STEP_TIMEOUT });
 
-        // ── CLICK-FIDELITY PREP (this PR) ── (2) dismiss any floating "How can we help?"/emplifi chat
-        // widget that can overlay the button + swallow the click, then (3) let the PDP settle (bounded,
-        // signal-based networkidle — NOT a fixed sleep) so React has wired the add handler before we click.
+        // ── CLICK-FIDELITY PREP ── dismiss any floating "How can we help?"/emplifi chat widget that can
+        // overlay the button + swallow the click (the vendored dismissInterstitials does not cover it),
+        // then let the PDP settle (bounded, signal-based) so React has a chance to wire the add handler.
         await dismissChatWidget(page);
         await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
 
-        // ═══ ADD-TO-CART — single click, arm on the in-place stepper transform, let the write settle ═══
-        // GROUND TRUTH (Craig's screenshots): ONE click commits the add and TRANSFORMS the "Add to Cart"
-        // button IN PLACE into a quantity stepper ([remove/trash] [qty] [+]; on search cards the "+" becomes
-        // a filled "1"). That transform IS the confirmation — there is NO modal (the old dlg1 was a false
-        // read of the stepper). Success signal = the stepper appears; we THEN let the cart-write persist
-        // (network event / badge increment) before advancing so verify-cart doesn't race an unflushed write.
-        // (a) button state + (b) match count, BEFORE the click:
-        const matchCount = await addToCartMatches.count().catch(() => -1); // (b) >1 ⇒ possible wrong instance
-        const visMatchCount = await addToCartMatches.filter({ visible: true }).count().catch(() => -1);
-        const btn = await readAddButtonState(addToCart); // (a) disabled/aria-*/on-screen/box/class
-        const cartBefore = await readCartCount(page); // (d) cart badge before
-        // Arm the cart-write network watch BEFORE the click (a working add fires one; the failing trace
-        // showed ZERO). Non-GET to a wegmans/wegapi cart|basket|item|order path, status < 500. The window
-        // is generous (ADD_SETTLE) so the write is caught even when it lands a beat after the transform.
-        const ADD_SETTLE = 8_000;
-        const cartWritePromise = page
-          .waitForResponse((r) => {
-            const method = r.request().method();
-            if (method === 'GET' || method === 'HEAD') return false;
-            const u = r.url();
-            let host = '';
-            try {
-              host = new URL(u).host.toLowerCase();
-            } catch {
-              return false;
-            }
-            const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
-            return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(u) && r.status() < 500;
-          }, { timeout: ADD_SETTLE })
-          .then((r) => safeLoc(r.url()))
-          .catch(() => null);
-
-        // ═══ THE CLICK — an ACTIONABILITY-CHECKED locator click (★ OVERLAY-INTERCEPTION FIX, this PR) ═══
-        // GROUND TRUTH (trace 926857): the prior raw page.mouse.click at the button's center was a real
-        // mouse event on the correct pill button, yet stepper0/cw0 — no commit. The trace also carries a
-        // position:fixed emplifi chat overlay ("How can we help?") + onetrust elements. A raw-coordinate
-        // click hits whatever is TOPMOST at that point with NO coverage check, so the overlay silently ate
-        // the click. Fix: (1) dismissChatWidget above now hides the emplifi launcher, and (2) switch to the
-        // actionability-checked locator click, which scrolls in, verifies the button RECEIVES the event,
-        // and ERRORS naming the interceptor if still covered — making interception LOUD + named instead of
-        // a silent miss. clickErr (the Playwright message, incl. the intercepting element) is surfaced in
-        // the ADD diag + failure so the next fix can target the exact overlay. The arm-on-transform below
-        // is UNCHANGED and remains the success check.
-        const { method: clickMethod, err: clickErr } = await actionabilityClick(addToCart);
-
-        // ARM ON THE TRANSFORM (the success signal): the plain "Add to Cart" button becomes a quantity
-        // stepper — a remove/trash control, a quantity indicator, or a +/− increment. No hard wait —
-        // appearsWithin resolves as soon as the stepper is visible (or times out at ADD_SETTLE).
-        const stepper = page
-          .locator('[class*="stepper" i], [class*="quantity" i], [data-testid*="quantity" i]')
-          .or(page.getByRole('button', { name: /^\s*[-+]\s*$|increase|decrease|increment|decrement|quantity|remove|delete/i }))
-          .or(page.getByRole('spinbutton'));
-        const added = page.getByText(/added to (your )?(cart|list)|item added|in your cart|added!/i);
-        const [stepperSeen, addedSeen] = await Promise.all([
-          appearsWithin(stepper, ADD_SETTLE),
-          appearsWithin(added, 2200),
-        ]);
-
-        // LET THE WRITE PERSIST before advancing: await the cart-write network event (primary), then read
-        // the cart badge. If the transform is up but no cart-write was observed (endpoint pattern may
-        // differ), give the write a short bounded settle so it flushes before we navigate to /shop/cart.
-        const cartWriteLoc = await cartWritePromise; // resolved host/path or null
-        if (stepperSeen && !cartWriteLoc) {
-          await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
-        }
-        const cartAfter = await readCartCount(page); // (d) cart badge after
-
-        // The add committed if the button TRANSFORMED (ground-truth confirmation) OR a cart-write fired OR
-        // an "added" confirmation showed OR the cart badge incremented. Absent ALL ⇒ the add did not take.
-        const cartIncremented = cartBefore != null && cartAfter != null && cartAfter > cartBefore;
-        const addConfirmed = stepperSeen || !!cartWriteLoc || addedSeen || cartIncremented;
-        const btnStr = btn
-          ? `dis${btn.dis ? 1 : 0}/aDis${btn.ariaDis ?? '-'}/aHid${btn.ariaHid ?? '-'}/on${btn.onScreen ? 1 : 0}/box${btn.box}/aria[${btn.aria}]/cls[${btn.cls}]`
-          : 'unread';
-        // Legible transform diagnostic — emitted UNCONDITIONALLY (rides Node stdout + trace_signals.console)
-        // so a future failure shows exactly what did/didn't happen: did the stepper appear? cart-write? badge?
-        const addDiag =
-          `[full-shop-flow] ADD ${item} match=${matchCount}(vis${visMatchCount}) click=${clickMethod} ` +
-          `btn={${btnStr}} transform={stepper${stepperSeen ? 1 : 0}/added${addedSeen ? 1 : 0}/` +
-          `cw${cartWriteLoc ? 1 : 0}} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
-          (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '') +
-          (clickErr ? ' clickErr=1(intercept?)' : '');
-        console.log(addDiag); // Node stdout (deep-dive)
-        await page.evaluate((m) => console.warn(m), addDiag.slice(0, 195)).catch(() => {}); // → trace_signals.console
-
-        if (!addConfirmed) {
-          // The add did NOT take: the button never transformed into a stepper, no cart-write fired, no
-          // "added" confirmation, and the cart badge did not increment. Likely the single click landed
-          // before the button was interactive, or the selector matched a decoy (inspect btn/match). runStep
-          // wraps this into error_message + trace_signals.
-          const clickErrNote = clickErr
-            ? ` :: add-click actionability error (NAMES the intercepting overlay to dismiss next): ${clickErr.slice(0, 400)}`
-            : '';
-          throw new Error(
-            `${addDiag}${clickErrNote} :: add-${item} did NOT confirm — the Add to Cart button did not transform into a ` +
-              `quantity stepper, no cart-write fired, no "added" confirmation, and the cart did not increment. ` +
-              `Check btn={…} (dis1/aHid1/on0 ⇒ not interactive), match>1 (⇒ decoy/wrong instance), and clickErr ` +
-              `(⇒ an overlay intercepted the actionability-checked click — dismiss the named element).`,
-          );
-        }
+        // ═══ ADD-TO-CART — CLICK-STRATEGY LADDER (first-commit-wins; full telemetry on total failure) ═══
+        // Craig confirms the add works MANUALLY on this buy-box button → a scripting problem (correct
+        // button clicked, React onClick doesn't fire; top hypothesis = hydration timing). addToCartLadder
+        // runs hydrate+locator → precise-center → raw-pointer → dispatch-events → force, stopping at the
+        // first rung whose stepper transform appears OR whose cart-write fires, capturing the
+        // reactHandler/hydration state + a transform-independent cart-write signal for EACH rung. On
+        // success it records which strategy committed; on total failure it throws with the full ladder map
+        // (every rung's reactHandler / click / transform / cartWrite) — a maximally diagnostic fire either
+        // way. runStep wraps a throw into error_message + trace_signals.
+        await addToCartLadder(page, item, addToCart, addToCartMatches);
       });
     }
 
