@@ -203,33 +203,38 @@ async function readAddButtonState(
     .catch(() => null);
 }
 
-/** ★ CLICK-FIDELITY: a REAL, TRUSTED pointer click at the element's true on-screen center — scroll into
- *  view, read the bounding box, then page.mouse move → down → up (a genuine pointerdown→pointerup→click
- *  at that coordinate). GROUND TRUTH (trace 925765): on the PDP, the large "Add to Cart" button is present
- *  and a plain locator.click() reports success, yet the React add handler never fires (cart0 + ZERO
- *  cart-writes); Craig's screenshots prove the SAME button commits for a human. A full mouse sequence at
- *  the real center is the highest-fidelity interaction Playwright can produce. Returns 'mouse' when the
- *  pointer path fired, 'locator' when it fell back (no bounding box) so the ADD diag records which ran. */
-async function realPointerClick(page: Page, loc: Loc): Promise<'mouse' | 'locator'> {
+/** ★ ACTIONABILITY-CHECKED add-to-cart click (this PR). Playwright's locator.click() performs full
+ *  actionability: it scrolls the button into view, waits for it to be stable and to RECEIVE pointer
+ *  events, and THROWS a descriptive error NAMING the intercepting element if an overlay covers the
+ *  button. This REPLACES the prior raw `page.mouse.move/down/up` at the button's center (trace 925765/
+ *  926857): a raw-coordinate click hits whatever is TOPMOST at that point with NO interception check, so
+ *  the fixed emplifi chat overlay sitting over the button silently ate the click (real mouse event, pill
+ *  button matched, yet stepper0/cw0 — zero cart-write). Switching back to the actionability-checked
+ *  locator click turns interception from a SILENT MISS into a LOUD, NAMED error → the diag shows exactly
+ *  which overlay to dismiss next (or the click lands and commits, if dismissChatWidget cleared it).
+ *  Returns {method,err}: 'locator' on a clean click; 'failed' with the Playwright message (which names
+ *  the intercepting element on an actionability failure) so the ADD diag/error surfaces it. Never throws. */
+async function actionabilityClick(loc: Loc): Promise<{ method: 'locator' | 'failed'; err: string | null }> {
   const target = loc.first();
   await target.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
-  const box = await target.boundingBox().catch(() => null);
-  if (!box || box.width <= 0 || box.height <= 0) {
-    await target.click({ timeout: 5000 }).catch(() => {});
-    return 'locator';
+  try {
+    await target.click({ timeout: 8000 });
+    return { method: 'locator', err: null };
+  } catch (e) {
+    return { method: 'failed', err: e instanceof Error ? e.message : String(e) };
   }
-  const cx = box.x + box.width / 2;
-  const cy = box.y + box.height / 2;
-  await page.mouse.move(cx, cy).catch(() => {});
-  await page.mouse.down().catch(() => {});
-  await page.mouse.up().catch(() => {});
-  return 'mouse';
 }
 
-/** Best-effort dismiss of the bottom-right "How can we help?"/emplifi chat bubble (and similar floating
- *  widgets) that can overlay the PDP and swallow a click. The vendored dismissInterstitials covers
- *  cookie/consent/close banners but NOT this chat widget. CONSERVATIVE: only clicks an explicit close/
- *  minimize affordance so it can never OPEN the chat. Never throws. */
+/** Best-effort neutralize the bottom-right "How can we help?"/emplifi chat bubble (and similar floating
+ *  widgets) that overlay the PDP and swallow the add-to-cart click. The vendored dismissInterstitials
+ *  covers cookie/consent/close banners but NOT this chat widget. TWO-PART, both non-fatal:
+ *   (1) click an explicit close/minimize affordance if the widget exposes one (CONSERVATIVE: never a
+ *       control that could OPEN the chat);
+ *   (2) then HIDE any residual fixed-position emplifi/chat launcher via a scoped style injection — the
+ *       collapsed launcher ("How can we help?", bot.emplifi.io) often carries NO close control, so hiding
+ *       it (display:none + pointer-events:none) is what actually removes the overlay from the hit-test
+ *       so it can never intercept the click. Scoped to emplifi + explicit chat-launcher hooks so it can
+ *       never touch the product buy-box. Never throws. */
 async function dismissChatWidget(page: Page): Promise<void> {
   const closer = page
     .getByRole('button', { name: /close chat|minimize chat|close (the )?chat|hide chat|close help/i })
@@ -239,6 +244,19 @@ async function dismissChatWidget(page: Page): Promise<void> {
   if (await closer.isVisible({ timeout: 800 }).catch(() => false)) {
     await closer.click({ timeout: 1500 }).catch(() => {});
   }
+  await page
+    .evaluate(() => {
+      const id = 'sw-hide-chat-overlays';
+      if (document.getElementById(id)) return;
+      const style = document.createElement('style');
+      style.id = id;
+      style.textContent =
+        '[class*="emplifi" i],[id*="emplifi" i],iframe[src*="emplifi" i],' +
+        '[class*="chat-launcher" i],[class*="chat-widget" i],[id*="chat-widget" i],' +
+        '[aria-label*="how can we help" i]{display:none !important;pointer-events:none !important;}';
+      document.head.appendChild(style);
+    })
+    .catch(() => {});
 }
 
 /**
@@ -580,15 +598,18 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           .then((r) => safeLoc(r.url()))
           .catch(() => null);
 
-        // ═══ THE CLICK — a REAL, TRUSTED pointer interaction (★ CLICK-FIDELITY FIX, this PR) ═══
-        // GROUND TRUTH (trace 925765): PDP navigation now works — the flow fails ON /shop/product/… with
-        // the large "Add to Cart" button PRESENT and clicked, yet cart0 + ZERO cart-writes. Craig's
-        // screenshots prove that same button commits for a human (click → [trash|1|+] stepper). Button and
-        // page are right; the plain locator.click() no-op'd the React add handler. Fire a genuine
-        // page.mouse move→down→up at the button's true on-screen center instead (realPointerClick). The
-        // arm-on-transform below is UNCHANGED and remains the success check — if the button transforms and
-        // a cart-write fires, the real click committed. clickMethod is recorded in the ADD diag.
-        const clickMethod = await realPointerClick(page, addToCart);
+        // ═══ THE CLICK — an ACTIONABILITY-CHECKED locator click (★ OVERLAY-INTERCEPTION FIX, this PR) ═══
+        // GROUND TRUTH (trace 926857): the prior raw page.mouse.click at the button's center was a real
+        // mouse event on the correct pill button, yet stepper0/cw0 — no commit. The trace also carries a
+        // position:fixed emplifi chat overlay ("How can we help?") + onetrust elements. A raw-coordinate
+        // click hits whatever is TOPMOST at that point with NO coverage check, so the overlay silently ate
+        // the click. Fix: (1) dismissChatWidget above now hides the emplifi launcher, and (2) switch to the
+        // actionability-checked locator click, which scrolls in, verifies the button RECEIVES the event,
+        // and ERRORS naming the interceptor if still covered — making interception LOUD + named instead of
+        // a silent miss. clickErr (the Playwright message, incl. the intercepting element) is surfaced in
+        // the ADD diag + failure so the next fix can target the exact overlay. The arm-on-transform below
+        // is UNCHANGED and remains the success check.
+        const { method: clickMethod, err: clickErr } = await actionabilityClick(addToCart);
 
         // ARM ON THE TRANSFORM (the success signal): the plain "Add to Cart" button becomes a quantity
         // stepper — a remove/trash control, a quantity indicator, or a +/− increment. No hard wait —
@@ -625,7 +646,8 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           `[full-shop-flow] ADD ${item} match=${matchCount}(vis${visMatchCount}) click=${clickMethod} ` +
           `btn={${btnStr}} transform={stepper${stepperSeen ? 1 : 0}/added${addedSeen ? 1 : 0}/` +
           `cw${cartWriteLoc ? 1 : 0}} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
-          (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '');
+          (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '') +
+          (clickErr ? ' clickErr=1(intercept?)' : '');
         console.log(addDiag); // Node stdout (deep-dive)
         await page.evaluate((m) => console.warn(m), addDiag.slice(0, 195)).catch(() => {}); // → trace_signals.console
 
@@ -634,10 +656,14 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           // "added" confirmation, and the cart badge did not increment. Likely the single click landed
           // before the button was interactive, or the selector matched a decoy (inspect btn/match). runStep
           // wraps this into error_message + trace_signals.
+          const clickErrNote = clickErr
+            ? ` :: add-click actionability error (NAMES the intercepting overlay to dismiss next): ${clickErr.slice(0, 400)}`
+            : '';
           throw new Error(
-            `${addDiag} :: add-${item} did NOT confirm — the Add to Cart button did not transform into a ` +
+            `${addDiag}${clickErrNote} :: add-${item} did NOT confirm — the Add to Cart button did not transform into a ` +
               `quantity stepper, no cart-write fired, no "added" confirmation, and the cart did not increment. ` +
-              `Check btn={…} (dis1/aHid1/on0 ⇒ not interactive) and match>1 (⇒ decoy/wrong instance).`,
+              `Check btn={…} (dis1/aHid1/on0 ⇒ not interactive), match>1 (⇒ decoy/wrong instance), and clickErr ` +
+              `(⇒ an overlay intercepted the actionability-checked click — dismiss the named element).`,
           );
         }
       });
