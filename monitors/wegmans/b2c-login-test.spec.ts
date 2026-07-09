@@ -78,40 +78,20 @@ const B2C_HOST = 'myaccount.wegmans.com';
 /** The 3 ACA egress IPs InfoSec allowlisted (conditional on the header). Used to annotate a BOT_BLOCK. */
 const ALLOWLISTED_EGRESS_IPS = new Set(['20.85.72.149', '172.169.169.109', '20.80.135.196']);
 
-/** Read a required runner secret; throws a clear, value-free error if unset. The value is NEVER logged. */
-function requireSecret(name: string): string {
-  const v = process.env[name];
-  if (!v) {
-    throw new Error(
-      `[b2c-login-test] required secret env "${name}" is not set on the runner — set it as an ACA-job ` +
-        `secret before firing this on-demand instrument (never hard-code credentials).`,
-    );
-  }
-  return v;
-}
-
-type CredSource = 'credential' | 'env';
 /**
- * ★ CREDENTIAL SOURCE — model-B cutover, STAGED (fallback + breadcrumb; the follow-up PR removes the
- * fallback once proven). PREFER the per-monitor credential(role) — the dashboard editor's
- * checks.login_credentials, decrypted + published by the runner as SW_CRED_<ROLE> (loginCredentials.ts
- * credentialEnvKey === lib/flow.ts credential(): both `SW_CRED_${role.toUpperCase()}`). FALL BACK to the ACA
- * env secret when credential() yields nothing — it FAIL-CLOSES (throws) when SW_CRED_<ROLE> is unset/empty,
- * so the catch is the fallback trigger.
+ * ★ CREDENTIAL SOURCE — model-B HARD CUTOVER (fallback removed; #64 was the staged step). credential(role)
+ * is now the SOLE source: the dashboard editor's checks.login_credentials, decrypted + published by the
+ * runner as SW_CRED_<ROLE> (runner loginCredentials.ts credentialEnvKey === lib/flow.ts credential(): both
+ * `SW_CRED_${role.toUpperCase()}`). credential() is FAIL-CLOSED — it throws on an unset/empty SW_CRED_<ROLE>
+ * — so a broken cred path now REDS LOUDLY instead of silently falling back to the ACA env.
  *
- * ★ Anti-silent-fallback: the fallback masks ONLY a MISSING SW_CRED path (credential() threw). It does NOT
- * mask a wrong-but-present value — a non-empty wrong credential passes credential()'s empty-guard and would
- * fail the LOGIN (red) on validation, which is the intended loud signal. Returns which source supplied the
- * value so the caller can log a value-free breadcrumb; Craig confirms source='credential' before the
- * fallback is removed.
+ * PROVEN LIVE before this cutover: b2c sandbox run 2026-07-09 13:17:48Z (eastus2) logged
+ * `cred-source username=credential password=credential` + OUTCOME=COMPLETED (status=pass) — the credential()
+ * path supplied both creds, not the fallback.
+ *
+ * ★ The ACA-env secrets B2C_TEST_USER / B2C_TEST_PASS are NO LONGER b2c's source (this spec no longer reads
+ * them). Leave them set as a safety net / for any other consumer, but they are dead for b2c.
  */
-function resolveCredential(role: string, envFallbackName: string): { value: string; source: CredSource } {
-  try {
-    return { value: credential(role), source: 'credential' };
-  } catch {
-    return { value: requireSecret(envFallbackName), source: 'env' };
-  }
-}
 
 /** host + pathname ONLY — drops query/fragment where B2C tokens (code/id_token) live, so evidence is
  *  safe to log. Never pass a full URL to a log. */
@@ -422,18 +402,15 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
 }
 
 test('Wegmans B2C login — InfoSec on-demand unblock test', async ({ page }) => {
-  // Creds up front → a missing secret fails fast + value-free (never logged). Model-B cutover (STAGED):
-  // prefer the per-monitor credential(role); fall back to the ACA env secret until the credential() path
-  // is proven (see resolveCredential). Same code path every run (login-every-run, no session reuse).
-  const u = resolveCredential('username', 'B2C_TEST_USER');
-  const p = resolveCredential('password', 'B2C_TEST_PASS');
-  const username = u.value;
-  const password = p.value;
-  // ★ SOURCE BREADCRUMB (value-free): WHICH source supplied each credential. Emitted BEFORE the login
-  // attempt so it lands on every run in the runner CONTAINER LOGS (Node stdout) — the channel that survives
-  // a GREEN sensitive run (error_message is null on pass; no trace is persisted for a sensitive pass). Craig
-  // greps `cred-source` to confirm source=credential before the env fallback is removed. NEVER the value.
-  console.log(`[b2c-login-test] cred-source username=${u.source} password=${p.source}`);
+  // Creds up front, from credential() ONLY (model-B). credential() FAIL-CLOSES: if SW_CRED_USERNAME /
+  // SW_CRED_PASSWORD is unset/empty it throws here (value-free) → the run REDS loudly, no env fallback masks
+  // it. Same code path every run (login-every-run, no session reuse).
+  const username = credential('username');
+  const password = credential('password');
+  // ★ RESOLUTION SIGNAL (value-free): reaching this line means credential() resolved BOTH (it throws
+  // otherwise). Lands in the runner CONTAINER LOGS (Node stdout) — the channel that survives a GREEN
+  // sensitive run (error_message is null on pass; no trace persists for a sensitive pass). NEVER the value.
+  console.log('[b2c-login-test] cred-source username=credential password=credential (model-B; credential()-only)');
   // The discriminator token (same secret the runner uses). May be unset → the validity gate reports
   // INCONCLUSIVE_HEADER_DROPPED rather than silently running an invalid test.
   const bypassToken = process.env.VERCEL_BYPASS_TOKEN;
