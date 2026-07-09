@@ -127,6 +127,76 @@ async function collectLabels(loc: Loc, scanCap: number, out: string[]): Promise<
 const loggedInAffordance = (page: Page) =>
   page.getByRole('link', { name: LOGGED_IN_AFFORDANCE_RX }).or(page.getByRole('button', { name: LOGGED_IN_AFFORDANCE_RX }));
 
+// ── Add-to-cart NO-OP diagnostics (this PR) ─────────────────────────────────────────────────────────
+// Ground truth (surfaced authenticated trace, run 925241): the flow logs in, is on the correct store
+// (products fetched in store-84/McKinley context), the "add to cart" button IS found and clicked (~12
+// clicks, no click-not-found), BUT there are ZERO cart-write API calls — the click is a NO-OP for an
+// UNKNOWN reason. This instrumentation does NOT fix the add; it captures the evidence that distinguishes:
+//   CASE 1 DECOY/WRONG BUTTON  — disabled/aria-disabled/aria-hidden/off-screen match, or >1 match (wrong instance)
+//   CASE 2 QUANTITY-STEPPER    — the click reveals a +/- stepper (a 2nd interaction is needed to commit)
+//   CASE 3 FULFILLMENT/STORE GATE — the click surfaces a "select store"/"not available"/"choose fulfillment" prompt
+// All captured items are DOM structure / URL host+path / booleans — never creds, token, or page HTML.
+
+/** Armed visibility probe for the post-click DOM delta — resolves true if the locator becomes visible
+ *  within ms, false otherwise. NOT a hard wait: it is an awaited waitFor that returns as soon as it
+ *  resolves (or times out). Used to record WHICH affordance the add-to-cart click surfaced. */
+async function appearsWithin(loc: Loc, ms: number): Promise<boolean> {
+  return loc
+    .first()
+    .waitFor({ state: 'visible', timeout: ms })
+    .then(() => true)
+    .catch(() => false);
+}
+
+/** Best-effort header cart-count badge read (CASE d: did the click increment the cart?). Tries the
+ *  common badge shapes, then a cart link/button aria-label "N items". Returns the integer or null when
+ *  no numeric badge is found. Structural only — reads a small count string, never account data. */
+async function readCartCount(page: Page): Promise<number | null> {
+  const badgeSelectors = [
+    '[data-testid*="cart-count" i]',
+    '[data-testid*="cart" i] [class*="count" i]',
+    'a[href*="/cart" i] [class*="badge" i], a[href*="/cart" i] [class*="count" i]',
+    '[class*="cart" i] [class*="badge" i], [class*="cart" i] [class*="count" i]',
+  ];
+  for (const sel of badgeSelectors) {
+    const loc = page.locator(sel).filter({ visible: true }).first();
+    if (await loc.count().catch(() => 0)) {
+      const t = (await loc.innerText({ timeout: 400 }).catch(() => '')).trim();
+      const m = t.match(/\d+/);
+      if (m) return parseInt(m[0], 10);
+    }
+  }
+  const cartCtl = page.getByRole('link', { name: /cart/i }).or(page.getByRole('button', { name: /cart/i })).first();
+  const al = await cartCtl.getAttribute('aria-label').catch(() => null);
+  if (al) {
+    const m = al.match(/(\d+)\s*(item|product)/i);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+/** Capture the add-to-cart button's own state BEFORE the click (CASE 1: decoy/disabled/off-screen).
+ *  Bounding-box + attributes + class list are DOM structure, not PII. Guarded; null on any failure. */
+async function readAddButtonState(
+  loc: Loc,
+): Promise<{ dis: boolean; ariaDis: string | null; ariaHid: string | null; onScreen: boolean; box: string; cls: string } | null> {
+  return loc
+    .evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const vw = window.innerWidth || 0;
+      const vh = window.innerHeight || 0;
+      return {
+        dis: el.hasAttribute('disabled') || (el as HTMLButtonElement).disabled === true,
+        ariaDis: el.getAttribute('aria-disabled'),
+        ariaHid: el.getAttribute('aria-hidden'),
+        onScreen: r.width > 0 && r.height > 0 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0,
+        box: `${Math.round(r.width)}x${Math.round(r.height)}`,
+        cls: (el.getAttribute('class') || '').slice(0, 100),
+      };
+    })
+    .catch(() => null);
+}
+
 /**
  * ★ STRUCTURAL, REDACTION-SAFE step-failure diagnostic (reuses the b2c OTHER-DIAG design + its
  * survival fix). Everything is structure / URL host+path / PII-filtered labels — NO page.content(),
@@ -373,11 +443,12 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         // ★ NET-NEW / UNVERIFIED: the authenticated Add-to-Cart affordance (a pickup fulfillment must be
         // set; a store/fulfillment modal may intercept). Resilient: prefer a real "Add to Cart" button;
         // if a fulfillment modal blocks it, choose PICKUP and retry. First-fire diag corrects this.
-        const addToCart = page
+        // ★ DIAG (unchanged resolution): split so the match COUNT (CASE 1: wrong instance) can be read;
+        //   `addToCart` is byte-for-byte the same locator/click as before — the diag only OBSERVES it.
+        const addToCartMatches = page
           .getByRole('button', { name: /add to cart/i })
-          .or(page.locator('button[class*="add" i][class*="cart" i]'))
-          .filter({ visible: true })
-          .first();
+          .or(page.locator('button[class*="add" i][class*="cart" i]'));
+        const addToCart = addToCartMatches.filter({ visible: true }).first();
         if (!(await isVisibleSafe(addToCart))) {
           const pickup = page.getByRole('button', { name: /pickup/i }).filter({ visible: true }).first();
           if (await isVisibleSafe(pickup)) await pickup.click({ timeout: 5000 }).catch(() => {});
@@ -389,7 +460,82 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           throw new Error(`add-${item}: first result is unavailable — widen the search or pick the next in-stock result (determinism gap to close on first fire).`);
         }
         await expect(addToCart, `add-${item}: Add to Cart affordance not found (NET-NEW selector — verify from diag)`).toBeVisible({ timeout: STEP_TIMEOUT });
+
+        // ═══ ADD-TO-CART NO-OP DIAGNOSTIC (this PR — instruments; does NOT fix the add) ═══════════════
+        // The click below is UNCHANGED and still expected to no-op. We capture the discriminating
+        // evidence AROUND it so the next fire reveals CASE 1 (decoy/disabled/multi-match), CASE 2
+        // (quantity-stepper appears), or CASE 3 (fulfillment/store gate appears).
+        // (a) button state + (b) match count, BEFORE the click:
+        const matchCount = await addToCartMatches.count().catch(() => -1); // (b) >1 ⇒ possible wrong instance
+        const visMatchCount = await addToCartMatches.filter({ visible: true }).count().catch(() => -1);
+        const btn = await readAddButtonState(addToCart); // (a) disabled/aria-*/on-screen/box/class
+        const cartBefore = await readCartCount(page); // (d) cart badge before
+        // (c-net) Arm a cart-write network watch BEFORE the click (ground truth: a working add fires one;
+        // the trace showed ZERO). Non-GET to a wegmans/wegapi cart|basket|item|order path, status < 500.
+        const cartWritePromise = page
+          .waitForResponse((r) => {
+            const method = r.request().method();
+            if (method === 'GET' || method === 'HEAD') return false;
+            const u = r.url();
+            let host = '';
+            try {
+              host = new URL(u).host.toLowerCase();
+            } catch {
+              return false;
+            }
+            const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+            return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(u) && r.status() < 500;
+          }, { timeout: 2500 })
+          .then((r) => safeLoc(r.url()))
+          .catch(() => null);
+
+        // THE CLICK — byte-for-byte unchanged (we WANT it to still no-op so the diag captures the cause).
         await addToCart.click({ timeout: 5000 });
+
+        // (c-dom) Armed post-click delta — WHICH affordance surfaced in the ~2s after the click.
+        const stepper = page
+          .locator('[class*="stepper" i], [class*="quantity" i], [data-testid*="quantity" i]')
+          .or(page.getByRole('button', { name: /^\s*[-+]\s*$|increase|decrease|increment|decrement|quantity/i }))
+          .or(page.getByRole('spinbutton'));
+        const dialog = page.getByRole('dialog').or(page.locator('[role="dialog"], [class*="modal" i][class*="open" i], [aria-modal="true"]'));
+        const gate = page.getByText(/select (a |your )?store|not available( at| in)|unavailable at this store|choose (a |your )?(store|fulfillment|shopping mode)|change (your )?store|add a store/i);
+        const added = page.getByText(/added to (your )?(cart|list)|item added|in your cart|added!/i);
+        const [stepperSeen, dialogSeen, gateSeen, addedSeen] = await Promise.all([
+          appearsWithin(stepper, 2200),
+          appearsWithin(dialog, 2200),
+          appearsWithin(gate, 2200),
+          appearsWithin(added, 2200),
+        ]);
+        const cartWriteLoc = await cartWritePromise; // (c-net) resolved host/path or null
+        const cartAfter = await readCartCount(page); // (d) cart badge after
+
+        // A positive add is confirmed by ANY of: a cart-write network event, an "added" confirmation, or a
+        // cart-badge increment. Absent ALL of them ⇒ the click no-op'd (current state) — throw with the
+        // evidence so it rides error_message. A FUTURE fixed add trips one of these and does NOT throw.
+        const cartIncremented = cartBefore != null && cartAfter != null && cartAfter > cartBefore;
+        const addConfirmed = !!cartWriteLoc || addedSeen || cartIncremented;
+        const btnStr = btn
+          ? `dis${btn.dis ? 1 : 0}/aDis${btn.ariaDis ?? '-'}/aHid${btn.ariaHid ?? '-'}/on${btn.onScreen ? 1 : 0}/box${btn.box}/cls[${btn.cls}]`
+          : 'unread';
+        const addDiag =
+          `[full-shop-flow] ADD-DIAG ${item} match=${matchCount}(vis${visMatchCount}) ` +
+          `btn={${btnStr}} post={step${stepperSeen ? 1 : 0}dlg${dialogSeen ? 1 : 0}gate${gateSeen ? 1 : 0}add${addedSeen ? 1 : 0}` +
+          `cw${cartWriteLoc ? 1 : 0}} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
+          (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '');
+        // Emit UNCONDITIONALLY so the evidence surfaces even on a (future) passing add:
+        console.log(addDiag); // Node stdout (deep-dive)
+        await page.evaluate((m) => console.warn(m), addDiag.slice(0, 195)).catch(() => {}); // → trace_signals.console
+
+        if (!addConfirmed) {
+          // No-op confirmed. The post={} deltas pick the CASE: step1 ⇒ CASE 2 (stepper — 2nd interaction
+          // needed); gate1/dlg1 ⇒ CASE 3 (fulfillment/store gate); all-0 with dis1/aHid1/on0/match>1 ⇒
+          // CASE 1 (decoy/disabled/wrong instance). runStep wraps this into error_message + trace_signals.
+          throw new Error(
+            `${addDiag} :: add-${item} CLICK was a NO-OP (no cart-write, no confirmation, cart did not increment). ` +
+              `CASE: step1=stepper(CASE2, needs 2nd interaction) · gate1/dlg1=fulfillment-or-store-gate(CASE3) · ` +
+              `all-0+dis1/aHid1/on0/match>1=decoy-or-wrong-instance(CASE1). Diagnostic only — not yet fixed.`,
+          );
+        }
       });
     }
 
