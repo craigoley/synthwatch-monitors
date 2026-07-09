@@ -293,6 +293,69 @@ function isCartWrite(method: string, url: string, status: number): boolean {
   return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(url) && status < 500;
 }
 
+/** ★ FULFILLMENT-CONTEXT WRITE — a first-party set-store / commit-fulfillment network WRITE (non-GET to a
+ *  wegmans.com store/fulfillment/pickup/context/session endpoint). This is the signal the session BOUND the
+ *  pickup-at-McKinley choice server-side. Trace 927288 showed the session only GETs store data
+ *  (/api/stores/store-number/84, an instore/108 default) and NEVER fires this write — so add-to-cart later
+ *  finds no pickup-at-84 cart context and no-ops. Keyed on method + host + path, never the body. */
+function isFulfillmentWrite(method: string, url: string, status: number): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  let host = '';
+  try {
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return false;
+  }
+  const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+  return onWegmansApi && /\/(store|stores|fulfil|pickup|context|session|shopping-?mode|order|cart|basket)/i.test(url) && status < 500;
+}
+
+/** ★ FULFILLMENT-STATE probe (structural, redaction-safe): best-effort dump of the app's ACTIVE store +
+ *  fulfillment MODE + whether a cart exists, read from client storage (localStorage / sessionStorage /
+ *  cookies — Wegmans persists the active store/fulfillment there). We scan only keys matching store/
+ *  fulfillment/cart and EXTRACT a store NUMBER (2-4 digits), a mode word (pickup/instore/delivery), and a
+ *  cart-exists boolean — NEVER returning a raw value, token, or account data. Used to CONFIRM the session
+ *  bound to pickup@McKinley(84) before shopping (the add-to-cart precondition). */
+async function readFulfillmentState(page: Page): Promise<{ store: string; mode: string; cart: string; src: string }> {
+  return page
+    .evaluate(() => {
+      const out = { store: 'none', mode: 'none', cart: 'none', src: 'none' };
+      const modeOf = (s: string) =>
+        /pickup/i.test(s) ? 'pickup' : /delivery/i.test(s) ? 'delivery' : /in-?store/i.test(s) ? 'instore' : '';
+      const scan = (blob: string, src: string) => {
+        if (out.mode === 'none') {
+          const m = modeOf(blob);
+          if (m) { out.mode = m; out.src = src; }
+        }
+        if (out.store === 'none') {
+          const sm = /store[^0-9]{0,20}(\d{2,4})/i.exec(blob) || /(\d{2,4})[^0-9]{0,20}mckinley/i.exec(blob);
+          if (sm) { out.store = sm[1]; out.src = src; }
+          else if (/mckinley/i.test(blob)) { out.store = 'mckinley'; out.src = src; }
+        }
+        if (out.cart === 'none' && /(cart|basket)[^a-z]{0,12}(id|number|items?|guid)/i.test(blob)) out.cart = 'exists';
+      };
+      const scanStore = (store: Storage, src: string) => {
+        try {
+          for (let i = 0; i < store.length; i++) {
+            const k = store.key(i) || '';
+            if (/store|fulfil|pickup|cart|shop|context|mode/i.test(k)) scan(k + ':' + (store.getItem(k) || ''), src);
+          }
+        } catch {
+          /* storage access can throw in some contexts */
+        }
+      };
+      scanStore(localStorage, 'ls');
+      scanStore(sessionStorage, 'ss');
+      try {
+        scan(document.cookie, 'cookie');
+      } catch {
+        /* cookie access can throw */
+      }
+      return out;
+    })
+    .catch(() => ({ store: 'none', mode: 'none', cart: 'none', src: 'none' }));
+}
+
 /** ★ ADD-TO-CART CLICK-STRATEGY LADDER (this PR). Craig confirms add-to-cart works MANUALLY on the buy-box
  *  button, so this is a Playwright scripting problem: the correct button is clicked but its React onClick
  *  doesn't fire. Instead of guessing one method, try a LADDER — first-commit-wins, full telemetry on
@@ -665,6 +728,17 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       const pickupAtMckinley = page.locator('.context-wrapper').filter({ hasText: /mckinley/i }).filter({ hasText: /pickup/i });
       if (await isVisibleSafe(pickupAtMckinley)) return;
 
+      // ★ ARM on the set-store / commit-fulfillment WRITE (before any picker action fires it). Trace 927288
+      // showed the current flow (open → Pickup → zip → Select) only GETs store data and NEVER writes the
+      // fulfillment context — so the session stays at its default (instore/108), add-to-cart finds no
+      // pickup-at-84 cart context, and silently no-ops. We add the missing COMMIT below and confirm THIS
+      // write fires (or the app state reflects pickup@84) before shopping. Armed early so it catches the
+      // write whether the Select click or the commit action fires it.
+      const setStoreWrite = page
+        .waitForResponse((r) => isFulfillmentWrite(r.request().method(), r.url(), r.status()), { timeout: STEP_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
+
       // (2) Open the "How would you like to shop?" fulfillment dialog if a Pickup choice isn't already
       //     showing. On a fresh context it may auto-open; otherwise the header selector button opens it.
       const pickupChoice = page
@@ -716,7 +790,20 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       await mckinleySelect.click({ timeout: 5000 });
       await dismissInterstitials(page);
 
-      // (6) Confirm the header fulfillment context now reads McKinley (the "Pickup at McKinley" affordance).
+      // (6) ★ COMMIT the fulfillment choice SERVER-SIDE. Clicking "Select" updates the picker UI/header but
+      //     (per trace 927288) does NOT bind the session — a real user commits via a "Start Shopping / Shop
+      //     this store / Continue" action, which fires the set-store write. Do that (guarded; the button may
+      //     not exist if Select itself commits — then the arm still catches its write).
+      const commit = page
+        .locator('[role="dialog"]')
+        .getByRole('button', { name: /start shopping|shop this store|shop now|continue shopping|continue|confirm|shop store|done|save/i })
+        .or(page.locator('[role="dialog"] button[type="submit"]'))
+        .filter({ visible: true })
+        .first();
+      if (await isVisibleSafe(commit)) await commit.click({ timeout: 5000 }).catch(() => {});
+      await dismissInterstitials(page);
+
+      // (7) Confirm the header fulfillment context now reads McKinley (UI check — necessary, not sufficient).
       const storeSet = page
         .locator('.context-wrapper')
         .filter({ hasText: /mckinley/i })
@@ -726,6 +813,23 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         storeSet,
         'select-store-mckinley: no McKinley fulfillment-context confirmation after selecting — verify from the diag.',
       ).toBeVisible({ timeout: STEP_TIMEOUT });
+
+      // (8) ★ SERVER-BOUND GATE — the actual add-to-cart precondition. The UI header (7) is not enough; the
+      //     SESSION must be bound to pickup@McKinley(84). Confirm via EITHER the set-store WRITE having fired
+      //     (armed above) OR the app state reflecting pickup mode at store 84/McKinley. Emit FULFILLMENT-STATE
+      //     either way so the fire is self-diagnosing (structural: store number + mode + cart + source only).
+      const setStoreSeen = await setStoreWrite;
+      const fs = await readFulfillmentState(page);
+      console.log(
+        `[full-shop-flow] FULFILLMENT-STATE store=${fs.store} mode=${fs.mode} cart=${fs.cart} src=${fs.src} setStoreWrite=${setStoreSeen ? 'y' : 'n'}`,
+      );
+      const boundByState = fs.mode === 'pickup' && (fs.store === '84' || /mckinley/i.test(fs.store));
+      expect(
+        setStoreSeen || boundByState,
+        `select-store-mckinley: fulfillment context NOT bound server-side — UI shows McKinley but no set-store ` +
+          `write fired and app state is not pickup@84 (store=${fs.store} mode=${fs.mode} setStoreWrite=${setStoreSeen ? 'y' : 'n'}). ` +
+          `add-to-cart would no-op for lack of a cart context; fix the commit action from the FULFILLMENT-STATE diag.`,
+      ).toBeTruthy();
     });
 
     // ---- STEP(s): search + add each item (REUSED search selectors; NET-NEW add-to-cart) ------------
