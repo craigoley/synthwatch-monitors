@@ -439,8 +439,31 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         await dismissInterstitials(page);
         const firstProduct = page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
         await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
+
+        // ★ ROOT-CAUSE FIX (this PR): the add MUST commit on the PDP, whose LARGE, clearly-labeled
+        // "Add to Cart" button reliably transforms into a stepper (Craig's screenshots) — NOT on
+        // /shop/search, whose COMPACT "+" circle is a no-op under automation. The OLD code clicked
+        // firstProduct with `.catch(() => {})`, so a tile click that did NOT navigate was SILENTLY
+        // SWALLOWED: the flow stayed on /shop/search (the observed add-* STEP-FAIL finalUrl) and then
+        // clicked the search "+", which arm-on-transform correctly proved never commits (cart0, zero
+        // cart-writes). Make the PDP navigation EXPLICIT + VERIFIED: capture the product href, click the
+        // tile, and if we did NOT land on /shop/product/, navigate to the href directly. Then HARD-ASSERT
+        // we are on a PDP before hunting for "Add to Cart" — so the compact search "+" can never be the
+        // control we click. Store/fulfillment context is per-browser-context (set in select-store-mckinley)
+        // and persists across this same-context navigation, so the PDP still shows the authenticated add.
+        const productHref = (await firstProduct.getAttribute('href').catch(() => null)) ?? '';
         await firstProduct.click({ timeout: 5000 }).catch(() => {});
+        const onPdp = await page.waitForURL(/\/shop\/product\//, { timeout: 8000 }).then(() => true).catch(() => false);
+        if (!onPdp && productHref) {
+          const productUrl = new URL(productHref, 'https://www.wegmans.com').toString();
+          await page.goto(productUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        }
         await dismissInterstitials(page);
+        await expect(
+          page,
+          `add-${item}: did not reach a product detail page (/shop/product/…) — the search tile click did not ` +
+            `navigate and the direct product-URL fallback failed; the add must run on the PDP, never the search "+".`,
+        ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
 
         // ★ NET-NEW / UNVERIFIED: the authenticated Add-to-Cart affordance (a pickup fulfillment must be
         // set; a store/fulfillment modal may intercept). Resilient: prefer a real "Add to Cart" button;
