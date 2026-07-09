@@ -100,18 +100,6 @@ function safeLabel(name: string): string {
   if (/^(hi|hello|hey|welcome|greetings|good (morning|afternoon|evening))\b/i.test(n)) return '‹greeting›';
   return SAFE_LABEL_ALLOWLIST.has(n.toLowerCase()) ? n : '‹control›';
 }
-/** Light sanitizer for DIALOG UI copy (heading + button labels). Unlike safeLabel's nav allowlist, a
- *  post-add modal's controls are the UNKNOWN we're capturing ("Add to Cart"/"Update"/"+"/"Continue
- *  Shopping"/…), so an allowlist can't apply — but these are chrome, not secrets. We still scrub the two
- *  real PII risks: a personalized greeting (an account name the runner redactor won't catch) and any
- *  over-long string (cap → structural only). Whitespace-collapsed; `"`→`'` so it can't break the dlg=[…]
- *  quoting; empties dropped. */
-function sanitizeDialogText(s: string): string {
-  const n = (s || '').trim().replace(/\s+/g, ' ').replace(/"/g, "'");
-  if (!n) return '';
-  if (/^(hi|hello|hey|welcome|greetings|good (morning|afternoon|evening))\b/i.test(n)) return '‹greeting›';
-  return n.length > 40 ? n.slice(0, 40) + '…' : n;
-}
 type Loc = ReturnType<Page['locator']>;
 async function isVisibleSafe(loc: Loc): Promise<boolean> {
   try {
@@ -139,15 +127,17 @@ async function collectLabels(loc: Loc, scanCap: number, out: string[]): Promise<
 const loggedInAffordance = (page: Page) =>
   page.getByRole('link', { name: LOGGED_IN_AFFORDANCE_RX }).or(page.getByRole('button', { name: LOGGED_IN_AFFORDANCE_RX }));
 
-// ── Add-to-cart NO-OP diagnostics (this PR) ─────────────────────────────────────────────────────────
-// Ground truth (surfaced authenticated trace, run 925241): the flow logs in, is on the correct store
-// (products fetched in store-84/McKinley context), the "add to cart" button IS found and clicked (~12
-// clicks, no click-not-found), BUT there are ZERO cart-write API calls — the click is a NO-OP for an
-// UNKNOWN reason. This instrumentation does NOT fix the add; it captures the evidence that distinguishes:
-//   CASE 1 DECOY/WRONG BUTTON  — disabled/aria-disabled/aria-hidden/off-screen match, or >1 match (wrong instance)
-//   CASE 2 QUANTITY-STEPPER    — the click reveals a +/- stepper (a 2nd interaction is needed to commit)
-//   CASE 3 FULFILLMENT/STORE GATE — the click surfaces a "select store"/"not available"/"choose fulfillment" prompt
-// All captured items are DOM structure / URL host+path / booleans — never creds, token, or page HTML.
+// ── Add-to-cart transform confirmation (this PR) ─────────────────────────────────────────────────────
+// GROUND TRUTH (Craig's screenshots of the real wegmans.com/shop add-to-cart interaction — DEFINITIVE):
+// add-to-cart is a SINGLE CLICK. On a PDP the "Add to Cart" button TRANSFORMS IN PLACE into a quantity
+// stepper — [remove/trash] [qty e.g. "1"] [+] — and on search results the "+" circle becomes a filled
+// "1". Same control, NO modal/dialog. That in-place transform IS the success confirmation. The prior
+// ADD-DIAG's `dlg1` "dialog seen" reading was a FALSE POSITIVE — it misread the transformed stepper as a
+// modal (there is no add-to-cart dialog). The earlier `cw0` (zero cart-writes observed at /shop/cart)
+// came from the flow moving on to the cart before the write flushed server-side. So this step now: clicks
+// ONCE, ARMS ON the stepper transform as the positive signal, THEN lets the cart-write settle (network
+// event / badge increment) before advancing. All captured evidence is DOM structure / URL host+path /
+// booleans — never creds, token, or page HTML.
 
 /** Armed visibility probe for the post-click DOM delta — resolves true if the locator becomes visible
  *  within ms, false otherwise. NOT a hard wait: it is an awaited waitFor that returns as soon as it
@@ -207,59 +197,6 @@ async function readAddButtonState(
       };
     })
     .catch(() => null);
-}
-
-/** When the post-click delta shows a dialog (dlg1), capture the modal's IDENTIFYING controls so the
- *  add-to-cart fix can be authored from the dialog's REAL buttons — not a guess. Scoped to the DIALOG
- *  subtree only (the prior full-frame capture was too noisy to read): its heading/title, the visible
- *  button labels (THE discriminating evidence — "Add to Cart"/"Update"/"Confirm"/"+"/"−"/"Continue
- *  Shopping" tells us whether the fix is confirm-in-modal, set-qty-then-confirm, or dismiss-upsell), and
- *  whether a quantity input is present. Labels are UI copy run through sanitizeDialogText (greeting-scrub
- *  + length-cap) — structure/labels only, never HTML or PII. Returns a compact
- *  `title:"…" btns:"A|B|+|−" qty:N` string, or null if no dialog root resolves. */
-async function readDialogContents(page: Page): Promise<string | null> {
-  const root = page
-    .locator('[role="dialog"], [aria-modal="true"], [class*="modal" i][class*="open" i]')
-    .filter({ visible: true })
-    .first();
-  if (!(await root.count().catch(() => 0))) return null;
-
-  // Heading: first visible heading text inside the dialog, else the dialog's own aria-label.
-  let title = '';
-  const heading = root.getByRole('heading').filter({ visible: true }).first();
-  if (await heading.count().catch(() => 0)) {
-    title = (await heading.innerText({ timeout: 400 }).catch(() => '')).trim();
-  }
-  if (!title) title = (await root.getAttribute('aria-label').catch(() => '')) ?? '';
-  title = sanitizeDialogText(title);
-
-  // Buttons: visible buttons WITHIN the dialog — which control commits the add. Accessible name =
-  // innerText, else aria-label. Bounded scan; deduped; ≤8 emitted.
-  const btnLabels: string[] = [];
-  const buttons = root.getByRole('button').filter({ visible: true });
-  const bn = Math.min(await buttons.count().catch(() => 0), 12);
-  for (let i = 0; i < bn && btnLabels.length < 8; i++) {
-    const el = buttons.nth(i);
-    const raw =
-      (await el.innerText({ timeout: 200 }).catch(() => '')) || (await el.getAttribute('aria-label').catch(() => '')) || '';
-    const label = sanitizeDialogText(raw);
-    if (label && !btnLabels.includes(label)) btnLabels.push(label);
-  }
-
-  // Quantity control: a spinbutton / number input inside the dialog (does the add need a qty set first?).
-  // qty:none = no qty input · qty:<n> = input present, value n · qty:present = present, value unreadable.
-  const qtyVis = root
-    .getByRole('spinbutton')
-    .or(root.locator('input[type="number"], [class*="quantity" i] input, [class*="stepper" i] input'))
-    .filter({ visible: true });
-  const qtyN = await qtyVis.count().catch(() => 0);
-  let qtyStr = 'none';
-  if (qtyN) {
-    const v = (await qtyVis.first().inputValue({ timeout: 200 }).catch(() => '')).trim();
-    qtyStr = /^\d+$/.test(v) ? v : 'present';
-  }
-
-  return `title:"${title}" btns:"${btnLabels.join('|')}" qty:${qtyStr}`;
 }
 
 /**
@@ -526,17 +463,21 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         }
         await expect(addToCart, `add-${item}: Add to Cart affordance not found (NET-NEW selector — verify from diag)`).toBeVisible({ timeout: STEP_TIMEOUT });
 
-        // ═══ ADD-TO-CART NO-OP DIAGNOSTIC (this PR — instruments; does NOT fix the add) ═══════════════
-        // The click below is UNCHANGED and still expected to no-op. We capture the discriminating
-        // evidence AROUND it so the next fire reveals CASE 1 (decoy/disabled/multi-match), CASE 2
-        // (quantity-stepper appears), or CASE 3 (fulfillment/store gate appears).
+        // ═══ ADD-TO-CART — single click, arm on the in-place stepper transform, let the write settle ═══
+        // GROUND TRUTH (Craig's screenshots): ONE click commits the add and TRANSFORMS the "Add to Cart"
+        // button IN PLACE into a quantity stepper ([remove/trash] [qty] [+]; on search cards the "+" becomes
+        // a filled "1"). That transform IS the confirmation — there is NO modal (the old dlg1 was a false
+        // read of the stepper). Success signal = the stepper appears; we THEN let the cart-write persist
+        // (network event / badge increment) before advancing so verify-cart doesn't race an unflushed write.
         // (a) button state + (b) match count, BEFORE the click:
         const matchCount = await addToCartMatches.count().catch(() => -1); // (b) >1 ⇒ possible wrong instance
         const visMatchCount = await addToCartMatches.filter({ visible: true }).count().catch(() => -1);
         const btn = await readAddButtonState(addToCart); // (a) disabled/aria-*/on-screen/box/class
         const cartBefore = await readCartCount(page); // (d) cart badge before
-        // (c-net) Arm a cart-write network watch BEFORE the click (ground truth: a working add fires one;
-        // the trace showed ZERO). Non-GET to a wegmans/wegapi cart|basket|item|order path, status < 500.
+        // Arm the cart-write network watch BEFORE the click (a working add fires one; the failing trace
+        // showed ZERO). Non-GET to a wegmans/wegapi cart|basket|item|order path, status < 500. The window
+        // is generous (ADD_SETTLE) so the write is caught even when it lands a beat after the transform.
+        const ADD_SETTLE = 8_000;
         const cartWritePromise = page
           .waitForResponse((r) => {
             const method = r.request().method();
@@ -550,64 +491,61 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
             }
             const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
             return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(u) && r.status() < 500;
-          }, { timeout: 2500 })
+          }, { timeout: ADD_SETTLE })
           .then((r) => safeLoc(r.url()))
           .catch(() => null);
 
-        // THE CLICK — byte-for-byte unchanged (we WANT it to still no-op so the diag captures the cause).
+        // THE CLICK — a single click commits the add and begins the in-place transform.
         await addToCart.click({ timeout: 5000 });
 
-        // (c-dom) Armed post-click delta — WHICH affordance surfaced in the ~2s after the click.
+        // ARM ON THE TRANSFORM (the success signal): the plain "Add to Cart" button becomes a quantity
+        // stepper — a remove/trash control, a quantity indicator, or a +/− increment. No hard wait —
+        // appearsWithin resolves as soon as the stepper is visible (or times out at ADD_SETTLE).
         const stepper = page
           .locator('[class*="stepper" i], [class*="quantity" i], [data-testid*="quantity" i]')
-          .or(page.getByRole('button', { name: /^\s*[-+]\s*$|increase|decrease|increment|decrement|quantity/i }))
+          .or(page.getByRole('button', { name: /^\s*[-+]\s*$|increase|decrease|increment|decrement|quantity|remove|delete/i }))
           .or(page.getByRole('spinbutton'));
-        const dialog = page.getByRole('dialog').or(page.locator('[role="dialog"], [class*="modal" i][class*="open" i], [aria-modal="true"]'));
-        const gate = page.getByText(/select (a |your )?store|not available( at| in)|unavailable at this store|choose (a |your )?(store|fulfillment|shopping mode)|change (your )?store|add a store/i);
         const added = page.getByText(/added to (your )?(cart|list)|item added|in your cart|added!/i);
-        const [stepperSeen, dialogSeen, gateSeen, addedSeen] = await Promise.all([
-          appearsWithin(stepper, 2200),
-          appearsWithin(dialog, 2200),
-          appearsWithin(gate, 2200),
+        const [stepperSeen, addedSeen] = await Promise.all([
+          appearsWithin(stepper, ADD_SETTLE),
           appearsWithin(added, 2200),
         ]);
-        const cartWriteLoc = await cartWritePromise; // (c-net) resolved host/path or null
-        const cartAfter = await readCartCount(page); // (d) cart badge after
-        // (c-dlg) When the click opened a dialog (dlg1 — the PROVEN mechanism, run 925366), capture the
-        // modal's identifying controls (heading + button labels + qty input), scoped to the dialog subtree,
-        // so the NEXT PR authors the add-to-cart fix from the modal's REAL buttons instead of a guess. No
-        // dialog ⇒ dlg=none. We READ the dialog only — nothing inside it is clicked (acting blind is what
-        // we're avoiding); the step still no-ops, which is expected.
-        const dlgContents = dialogSeen ? await readDialogContents(page) : null;
-        const dlgStr = dialogSeen ? `[${dlgContents ?? 'seen-but-unread'}]` : 'none';
 
-        // A positive add is confirmed by ANY of: a cart-write network event, an "added" confirmation, or a
-        // cart-badge increment. Absent ALL of them ⇒ the click no-op'd (current state) — throw with the
-        // evidence so it rides error_message. A FUTURE fixed add trips one of these and does NOT throw.
+        // LET THE WRITE PERSIST before advancing: await the cart-write network event (primary), then read
+        // the cart badge. If the transform is up but no cart-write was observed (endpoint pattern may
+        // differ), give the write a short bounded settle so it flushes before we navigate to /shop/cart.
+        const cartWriteLoc = await cartWritePromise; // resolved host/path or null
+        if (stepperSeen && !cartWriteLoc) {
+          await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
+        }
+        const cartAfter = await readCartCount(page); // (d) cart badge after
+
+        // The add committed if the button TRANSFORMED (ground-truth confirmation) OR a cart-write fired OR
+        // an "added" confirmation showed OR the cart badge incremented. Absent ALL ⇒ the add did not take.
         const cartIncremented = cartBefore != null && cartAfter != null && cartAfter > cartBefore;
-        const addConfirmed = !!cartWriteLoc || addedSeen || cartIncremented;
+        const addConfirmed = stepperSeen || !!cartWriteLoc || addedSeen || cartIncremented;
         const btnStr = btn
           ? `dis${btn.dis ? 1 : 0}/aDis${btn.ariaDis ?? '-'}/aHid${btn.ariaHid ?? '-'}/on${btn.onScreen ? 1 : 0}/box${btn.box}/cls[${btn.cls}]`
           : 'unread';
+        // Legible transform diagnostic — emitted UNCONDITIONALLY (rides Node stdout + trace_signals.console)
+        // so a future failure shows exactly what did/didn't happen: did the stepper appear? cart-write? badge?
         const addDiag =
-          `[full-shop-flow] ADD-DIAG ${item} match=${matchCount}(vis${visMatchCount}) ` +
-          `btn={${btnStr}} post={step${stepperSeen ? 1 : 0}dlg${dialogSeen ? 1 : 0}gate${gateSeen ? 1 : 0}add${addedSeen ? 1 : 0}` +
-          `cw${cartWriteLoc ? 1 : 0}} dlg=${dlgStr} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
+          `[full-shop-flow] ADD ${item} match=${matchCount}(vis${visMatchCount}) ` +
+          `btn={${btnStr}} transform={stepper${stepperSeen ? 1 : 0}/added${addedSeen ? 1 : 0}/` +
+          `cw${cartWriteLoc ? 1 : 0}} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
           (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '');
-        // Emit UNCONDITIONALLY so the evidence surfaces even on a (future) passing add:
         console.log(addDiag); // Node stdout (deep-dive)
         await page.evaluate((m) => console.warn(m), addDiag.slice(0, 195)).catch(() => {}); // → trace_signals.console
 
         if (!addConfirmed) {
-          // No-op confirmed. The proven mechanism (run 925366): dlg1 — the click opens a DIALOG that the
-          // flow never advances, so the add is a two-step button→dialog→commit and step one is all we do.
-          // dlg=[title:… btns:… qty:…] now names the modal's REAL controls → THAT picks the exact add fix
-          // (confirm-in-modal vs set-qty-then-confirm vs dismiss-upsell). runStep wraps this into
-          // error_message + trace_signals. (step1=stepper/gate1=fulfillment-gate remain as fallbacks.)
+          // The add did NOT take: the button never transformed into a stepper, no cart-write fired, no
+          // "added" confirmation, and the cart badge did not increment. Likely the single click landed
+          // before the button was interactive, or the selector matched a decoy (inspect btn/match). runStep
+          // wraps this into error_message + trace_signals.
           throw new Error(
-            `${addDiag} :: add-${item} CLICK was a NO-OP (no cart-write, no confirmation, cart did not increment). ` +
-              `CASE: step1=stepper(CASE2, needs 2nd interaction) · gate1/dlg1=fulfillment-or-store-gate(CASE3) · ` +
-              `all-0+dis1/aHid1/on0/match>1=decoy-or-wrong-instance(CASE1). Diagnostic only — not yet fixed.`,
+            `${addDiag} :: add-${item} did NOT confirm — the Add to Cart button did not transform into a ` +
+              `quantity stepper, no cart-write fired, no "added" confirmation, and the cart did not increment. ` +
+              `Check btn={…} (dis1/aHid1/on0 ⇒ not interactive) and match>1 (⇒ decoy/wrong instance).`,
           );
         }
       });
