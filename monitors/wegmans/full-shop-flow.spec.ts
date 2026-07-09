@@ -12,7 +12,10 @@ import { test, expect, step, dismissInterstitials, credential, type Page } from 
  * ★★ SELECTOR-VERIFICATION STATUS (read before trusting a red run) ★★
  * REUSED + already-live-verified (proven in shipped specs — cited inline):
  *   • login: the B2C form ids (#signInName/#password/#next) + the myaccount.wegmans.com bypass-header
- *     scoped route + LOGGED_IN_AFFORDANCE_RX — from b2c-login-test.spec.ts (#52/#60).
+ *     scoped route + b2c's PROVEN completion signal — a real token-acquisition network event
+ *     (isTokenEvent) AND LOGGED_IN_AFFORDANCE_RX — from b2c-login-test.spec.ts (#52/#60). The
+ *     affordance ALONE was insufficient (it matches always-present nav chrome → false-green on an
+ *     aborted auth POST); requiring the token event is what makes login must-go-red.
  *   • search + first result: /shop/search?query=… + a[href*="/shop/product/"] — from search-product.spec.ts.
  *   • redaction/diag: safeLoc/safeLabel/isVisibleSafe/collectLabels + the survival-fixed emit — from
  *     b2c-login-test.spec.ts (#57/#59).
@@ -66,6 +69,23 @@ function safeLoc(url: string): string {
   } catch {
     return '(unparseable-url)';
   }
+}
+/** A B2C token-acquisition network event: the B2C token endpoint (2xx/3xx), a redirect back to a wegmans
+ *  host carrying an auth code/id_token, or the SelfAsserted "confirmed" step. We only INSPECT r.url();
+ *  we NEVER log its query (tokens live there). ★ Ported verbatim from b2c-login-test.spec.ts — this is
+ *  the PROVEN completion signal that b2c GREENs on (#60). Login only fires this after a real, completed
+ *  B2C auth; an aborted sign-in POST (trace run 925142: status -1) fires NONE → the login step REDs. */
+function isTokenEvent(status: number, url: string): boolean {
+  let host = '';
+  try {
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return false;
+  }
+  const tokenEndpoint = /\/oauth2\/v2\.0\/token/i.test(url) && status >= 200 && status < 400;
+  const codeRedirectToWegmans = /(^|\.)wegmans\.com$/.test(host) && /[?#&](code|id_token|access_token)=/.test(url);
+  const b2cConfirmed = /\/api\/CombinedSigninAndSignup\/confirmed/i.test(url) && status >= 200 && status < 400;
+  return tokenEndpoint || codeRedirectToWegmans || b2cConfirmed;
 }
 const SAFE_LABEL_ALLOWLIST = new Set([
   'account', 'my account', 'your account', 'my wegmans', 'rewards', 'sign out', 'log out', 'logout',
@@ -205,12 +225,39 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         .filter({ visible: true })
         .first();
       if (await signIn.isVisible({ timeout: 8000 }).catch(() => false)) await signIn.click({ timeout: 5000 });
+      await dismissInterstitials(page);
       await page.locator('#signInName').first().waitFor({ state: 'visible', timeout: STEP_TIMEOUT });
       await page.locator('#signInName').first().fill(username);
       await page.locator('#password').first().fill(password);
-      await page.locator('#next, #continue').or(page.getByRole('button', { name: /sign ?in|log ?in|continue|next/i })).filter({ visible: true }).first().click({ timeout: 5000 });
-      // Logged-in when the account affordance renders on wegmans.com (LOGGED_IN_AFFORDANCE_RX, #60).
-      await expect(loggedInAffordance(page).first(), 'login: no logged-in account affordance after submit').toBeVisible({ timeout: STEP_TIMEOUT });
+      const submit = page
+        .locator('#next, #continue')
+        .or(page.getByRole('button', { name: /sign ?in|log ?in|continue|next/i }))
+        .filter({ visible: true })
+        .first();
+      await expect(submit, 'login: B2C SelfAsserted submit button not found on the sign-in form').toBeVisible({ timeout: 10_000 });
+      // ★ ROOT-CAUSE FIX (trace run 925142): the OLD login confirmed ONLY on loggedInAffordance —
+      // but that regex matches always-present nav/footer chrome (account/orders/rewards…), so an
+      // ABORTED sign-in POST (status -1) false-GREENed here and the flow shopped UNAUTHENTICATED,
+      // reding 4 steps later at verify-cart-4 (the honest messenger). b2c-login-test GREENs on a
+      // real B2C TOKEN-ACQUISITION event (isTokenEvent), NOT the DOM alone. Reuse that proven signal:
+      // arm the token wait BEFORE submit (avoids the redirect race), then require BOTH the token event
+      // AND the affordance — exactly b2c's COMPLETED branch. Now a failed login REDs HERE, at login.
+      const tokenEvent = page
+        .waitForResponse((r) => isTokenEvent(r.status(), r.url()), { timeout: 45_000 })
+        .catch(() => null);
+      await submit.click({ timeout: 5000 });
+      const tok = await tokenEvent;
+      if (!tok) {
+        throw new Error(
+          'login: no B2C token-acquisition event within 45s of submit — auth did NOT complete ' +
+            '(aborted/blocked/creds-rejected). Login REDs here instead of silently shopping unauthenticated.',
+        );
+      }
+      // AND the post-login DOM anchor (b2c requires BOTH — token event + affordance — for COMPLETED).
+      await expect(
+        loggedInAffordance(page).first(),
+        'login: token acquired but no logged-in account affordance rendered (partial/aborted login)',
+      ).toBeVisible({ timeout: STEP_TIMEOUT });
       if (!bypassAppliedToB2C && bypassToken) {
         // The B2C redirect never rode our route → the login likely used a cached session; not fatal.
         console.log('[full-shop-flow] note: bypass header route did not fire on B2C (cached session?).');
