@@ -217,6 +217,68 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       }
     });
 
+    // ---- STEP: select the McKinley store — GATES add-to-cart ---------------------------------------
+    // Diagnosis (live add-milk STEP-FAIL: li1 cart0 ful1 + a "Stores" control): wegmans.com/shop gates the
+    // Add-to-Cart affordance behind a SELECTED STORE. Establish McKinley once, before the add loop; store
+    // context persists for the session.
+    // ★ REUSE: the McKinley store-list/row selectors are lifted VERBATIM from meals2go-cheese-pizza-cart
+    // .spec.ts (input#store-search-input filter → app-wegmans-store / button.wegmans-store-container row,
+    // matched by the store NAME "Mckinley" — a stable anchor, not position). ★ CAVEAT: that is the
+    // meals2go.com app; wegmans.com/shop is a DIFFERENT app that may render a different store-picker DOM
+    // (the two may share the Wegmans store-picker component — unverified). So this is NET-NEW / UNVERIFIED
+    // for the shop-flow, like the other net-new steps: a name-based role/text fallback backs the reused
+    // selectors, and a failure emits the structural OTHER-DIAG (via runStep) so the first sandbox fire
+    // reveals the real wegmans.com store-picker DOM and corrects it (runbook #63).
+    abortIfOverCap();
+    await runStep(page, 'select-store-mckinley', async () => {
+      await page.goto('https://www.wegmans.com/shop/search?query=milk', { waitUntil: 'domcontentloaded' });
+      await dismissInterstitials(page);
+      // Best-effort: open the store/fulfillment picker if it isn't already showing (the add-milk diag saw
+      // ful1, so it is often already present). Guarded — a no-op if the picker is already open.
+      const openPicker = page
+        .getByRole('button', { name: /choose (a|your) store|select (a )?store|set (your )?store|change store|find a store|store|pickup/i })
+        .filter({ visible: true })
+        .first();
+      if (await isVisibleSafe(openPicker)) await openPicker.click({ timeout: 5000 }).catch(() => {});
+      await dismissInterstitials(page);
+      // REUSED (meals2go): filter the (virtualized) store list to McKinley via input#store-search-input,
+      // with a resilient role fallback for the wegmans.com store-picker.
+      const storeFilter = page
+        .locator('input#store-search-input')
+        .or(page.locator('app-store-selector input[type="text"], app-store-selector input'))
+        .or(page.getByRole('textbox', { name: /store|search|zip|city/i }))
+        .filter({ visible: true })
+        .first();
+      if (await isVisibleSafe(storeFilter)) {
+        await storeFilter.click({ timeout: 4000 }).catch(() => {});
+        await storeFilter.fill('Mckinley').catch(() => {});
+      }
+      // REUSED (meals2go): click the McKinley store ROW (button.wegmans-store-container — the row, not the
+      // title span), matched by NAME; resilient name-based role/text fallback for the wegmans.com DOM.
+      const mckinleyStore = page
+        .locator('app-wegmans-store:has(span.store-title:text-is("Mckinley")) button.wegmans-store-container')
+        .or(page.locator('app-wegmans-store').filter({ hasText: /mckinley/i }).locator('button.wegmans-store-container'))
+        .or(page.getByRole('button', { name: /mckinley/i }))
+        .filter({ visible: true })
+        .first();
+      await expect(
+        mckinleyStore,
+        'select-store-mckinley: McKinley store row not found — NET-NEW for wegmans.com/shop (store-picker DOM likely differs from the reused meals2go pattern); verify from the diag.',
+      ).toBeVisible({ timeout: STEP_TIMEOUT });
+      await mckinleyStore.click({ timeout: 5000 });
+      await dismissInterstitials(page);
+      // Confirm a McKinley store context is established (REUSED confirmation shape + resilient fallback).
+      const storeSet = page
+        .locator('#main-header-fulfillment-info, button.change-store-button')
+        .filter({ hasText: /mckinley/i })
+        .or(page.getByText(/mckinley/i))
+        .first();
+      await expect(
+        storeSet,
+        'select-store-mckinley: no McKinley store-context confirmation after selecting — verify from the diag.',
+      ).toBeVisible({ timeout: STEP_TIMEOUT });
+    });
+
     // ---- STEP(s): search + add each item (REUSED search selectors; NET-NEW add-to-cart) ------------
     for (const item of SHOPPING_ITEMS) {
       abortIfOverCap();
