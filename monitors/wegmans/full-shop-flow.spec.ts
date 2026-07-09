@@ -1,4 +1,4 @@
-import { test, expect, step, dismissInterstitials, type Page } from '../../lib/flow';
+import { test, expect, step, dismissInterstitials, credential, type Page } from '../../lib/flow';
 
 /**
  * Monitor: wegmans-full-shop-flow — ★ FULL AUTHENTICATED PICKUP SHOPPING FLOW (SENSITIVE; ships DISABLED)
@@ -58,11 +58,6 @@ const STEP_TIMEOUT = 20_000;
 const LOGGED_IN_AFFORDANCE_RX = /account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i;
 
 // ── Redaction-safe helpers (inlined; a spec cannot import another spec — lib/* won't resolve at runtime) ──
-function requireSecret(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`[full-shop-flow] required secret env "${name}" not set on the runner (never hard-code credentials).`);
-  return v;
-}
 /** host + pathname only — drops query/fragment where tokens live. Safe to log. */
 function safeLoc(url: string): string {
   try {
@@ -169,8 +164,15 @@ async function runStep(page: Page, name: string, body: () => Promise<void>): Pro
 }
 
 test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
-  const username = requireSecret('SHOP_TEST_USER');
-  const password = requireSecret('SHOP_TEST_PASS');
+  // Creds from credential() ONLY (model-B) — check 355's UI-set login_credentials, decrypted + published by
+  // the runner as SW_CRED_<ROLE> (credential('username') → SW_CRED_USERNAME; env-mapping proven exact +
+  // fail-closed in b2c #64). credential() throws on unset/empty → a broken cred path REDS loudly. No env
+  // fallback: the shop-flow has no green baseline to protect (never passed), so fail-closed is exactly right.
+  const username = credential('username');
+  const password = credential('password');
+  // ★ RESOLUTION SIGNAL (value-free): reaching this line means credential() resolved BOTH (else it threw) —
+  // this is the shop-flow's FIRST-EVER cred resolution. Lands in the runner container logs. NEVER the value.
+  console.log('[full-shop-flow] cred-source username=credential password=credential (model-B; credential()-only)');
   const bypassToken = process.env.VERCEL_BYPASS_TOKEN;
   const startedAt = Date.now();
   const abortIfOverCap = () => {
