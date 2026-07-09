@@ -100,6 +100,18 @@ function safeLabel(name: string): string {
   if (/^(hi|hello|hey|welcome|greetings|good (morning|afternoon|evening))\b/i.test(n)) return '‹greeting›';
   return SAFE_LABEL_ALLOWLIST.has(n.toLowerCase()) ? n : '‹control›';
 }
+/** Light sanitizer for DIALOG UI copy (heading + button labels). Unlike safeLabel's nav allowlist, a
+ *  post-add modal's controls are the UNKNOWN we're capturing ("Add to Cart"/"Update"/"+"/"Continue
+ *  Shopping"/…), so an allowlist can't apply — but these are chrome, not secrets. We still scrub the two
+ *  real PII risks: a personalized greeting (an account name the runner redactor won't catch) and any
+ *  over-long string (cap → structural only). Whitespace-collapsed; `"`→`'` so it can't break the dlg=[…]
+ *  quoting; empties dropped. */
+function sanitizeDialogText(s: string): string {
+  const n = (s || '').trim().replace(/\s+/g, ' ').replace(/"/g, "'");
+  if (!n) return '';
+  if (/^(hi|hello|hey|welcome|greetings|good (morning|afternoon|evening))\b/i.test(n)) return '‹greeting›';
+  return n.length > 40 ? n.slice(0, 40) + '…' : n;
+}
 type Loc = ReturnType<Page['locator']>;
 async function isVisibleSafe(loc: Loc): Promise<boolean> {
   try {
@@ -195,6 +207,59 @@ async function readAddButtonState(
       };
     })
     .catch(() => null);
+}
+
+/** When the post-click delta shows a dialog (dlg1), capture the modal's IDENTIFYING controls so the
+ *  add-to-cart fix can be authored from the dialog's REAL buttons — not a guess. Scoped to the DIALOG
+ *  subtree only (the prior full-frame capture was too noisy to read): its heading/title, the visible
+ *  button labels (THE discriminating evidence — "Add to Cart"/"Update"/"Confirm"/"+"/"−"/"Continue
+ *  Shopping" tells us whether the fix is confirm-in-modal, set-qty-then-confirm, or dismiss-upsell), and
+ *  whether a quantity input is present. Labels are UI copy run through sanitizeDialogText (greeting-scrub
+ *  + length-cap) — structure/labels only, never HTML or PII. Returns a compact
+ *  `title:"…" btns:"A|B|+|−" qty:N` string, or null if no dialog root resolves. */
+async function readDialogContents(page: Page): Promise<string | null> {
+  const root = page
+    .locator('[role="dialog"], [aria-modal="true"], [class*="modal" i][class*="open" i]')
+    .filter({ visible: true })
+    .first();
+  if (!(await root.count().catch(() => 0))) return null;
+
+  // Heading: first visible heading text inside the dialog, else the dialog's own aria-label.
+  let title = '';
+  const heading = root.getByRole('heading').filter({ visible: true }).first();
+  if (await heading.count().catch(() => 0)) {
+    title = (await heading.innerText({ timeout: 400 }).catch(() => '')).trim();
+  }
+  if (!title) title = (await root.getAttribute('aria-label').catch(() => '')) ?? '';
+  title = sanitizeDialogText(title);
+
+  // Buttons: visible buttons WITHIN the dialog — which control commits the add. Accessible name =
+  // innerText, else aria-label. Bounded scan; deduped; ≤8 emitted.
+  const btnLabels: string[] = [];
+  const buttons = root.getByRole('button').filter({ visible: true });
+  const bn = Math.min(await buttons.count().catch(() => 0), 12);
+  for (let i = 0; i < bn && btnLabels.length < 8; i++) {
+    const el = buttons.nth(i);
+    const raw =
+      (await el.innerText({ timeout: 200 }).catch(() => '')) || (await el.getAttribute('aria-label').catch(() => '')) || '';
+    const label = sanitizeDialogText(raw);
+    if (label && !btnLabels.includes(label)) btnLabels.push(label);
+  }
+
+  // Quantity control: a spinbutton / number input inside the dialog (does the add need a qty set first?).
+  // qty:none = no qty input · qty:<n> = input present, value n · qty:present = present, value unreadable.
+  const qtyVis = root
+    .getByRole('spinbutton')
+    .or(root.locator('input[type="number"], [class*="quantity" i] input, [class*="stepper" i] input'))
+    .filter({ visible: true });
+  const qtyN = await qtyVis.count().catch(() => 0);
+  let qtyStr = 'none';
+  if (qtyN) {
+    const v = (await qtyVis.first().inputValue({ timeout: 200 }).catch(() => '')).trim();
+    qtyStr = /^\d+$/.test(v) ? v : 'present';
+  }
+
+  return `title:"${title}" btns:"${btnLabels.join('|')}" qty:${qtyStr}`;
 }
 
 /**
@@ -508,6 +573,13 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         ]);
         const cartWriteLoc = await cartWritePromise; // (c-net) resolved host/path or null
         const cartAfter = await readCartCount(page); // (d) cart badge after
+        // (c-dlg) When the click opened a dialog (dlg1 — the PROVEN mechanism, run 925366), capture the
+        // modal's identifying controls (heading + button labels + qty input), scoped to the dialog subtree,
+        // so the NEXT PR authors the add-to-cart fix from the modal's REAL buttons instead of a guess. No
+        // dialog ⇒ dlg=none. We READ the dialog only — nothing inside it is clicked (acting blind is what
+        // we're avoiding); the step still no-ops, which is expected.
+        const dlgContents = dialogSeen ? await readDialogContents(page) : null;
+        const dlgStr = dialogSeen ? `[${dlgContents ?? 'seen-but-unread'}]` : 'none';
 
         // A positive add is confirmed by ANY of: a cart-write network event, an "added" confirmation, or a
         // cart-badge increment. Absent ALL of them ⇒ the click no-op'd (current state) — throw with the
@@ -520,16 +592,18 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         const addDiag =
           `[full-shop-flow] ADD-DIAG ${item} match=${matchCount}(vis${visMatchCount}) ` +
           `btn={${btnStr}} post={step${stepperSeen ? 1 : 0}dlg${dialogSeen ? 1 : 0}gate${gateSeen ? 1 : 0}add${addedSeen ? 1 : 0}` +
-          `cw${cartWriteLoc ? 1 : 0}} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
+          `cw${cartWriteLoc ? 1 : 0}} dlg=${dlgStr} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
           (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '');
         // Emit UNCONDITIONALLY so the evidence surfaces even on a (future) passing add:
         console.log(addDiag); // Node stdout (deep-dive)
         await page.evaluate((m) => console.warn(m), addDiag.slice(0, 195)).catch(() => {}); // → trace_signals.console
 
         if (!addConfirmed) {
-          // No-op confirmed. The post={} deltas pick the CASE: step1 ⇒ CASE 2 (stepper — 2nd interaction
-          // needed); gate1/dlg1 ⇒ CASE 3 (fulfillment/store gate); all-0 with dis1/aHid1/on0/match>1 ⇒
-          // CASE 1 (decoy/disabled/wrong instance). runStep wraps this into error_message + trace_signals.
+          // No-op confirmed. The proven mechanism (run 925366): dlg1 — the click opens a DIALOG that the
+          // flow never advances, so the add is a two-step button→dialog→commit and step one is all we do.
+          // dlg=[title:… btns:… qty:…] now names the modal's REAL controls → THAT picks the exact add fix
+          // (confirm-in-modal vs set-qty-then-confirm vs dismiss-upsell). runStep wraps this into
+          // error_message + trace_signals. (step1=stepper/gate1=fulfillment-gate remain as fallbacks.)
           throw new Error(
             `${addDiag} :: add-${item} CLICK was a NO-OP (no cart-write, no confirmation, cart did not increment). ` +
               `CASE: step1=stepper(CASE2, needs 2nd interaction) · gate1/dlg1=fulfillment-or-store-gate(CASE3) · ` +
