@@ -199,6 +199,44 @@ async function readAddButtonState(
     .catch(() => null);
 }
 
+/** ★ CLICK-FIDELITY: a REAL, TRUSTED pointer click at the element's true on-screen center — scroll into
+ *  view, read the bounding box, then page.mouse move → down → up (a genuine pointerdown→pointerup→click
+ *  at that coordinate). GROUND TRUTH (trace 925765): on the PDP, the large "Add to Cart" button is present
+ *  and a plain locator.click() reports success, yet the React add handler never fires (cart0 + ZERO
+ *  cart-writes); Craig's screenshots prove the SAME button commits for a human. A full mouse sequence at
+ *  the real center is the highest-fidelity interaction Playwright can produce. Returns 'mouse' when the
+ *  pointer path fired, 'locator' when it fell back (no bounding box) so the ADD diag records which ran. */
+async function realPointerClick(page: Page, loc: Loc): Promise<'mouse' | 'locator'> {
+  const target = loc.first();
+  await target.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+  const box = await target.boundingBox().catch(() => null);
+  if (!box || box.width <= 0 || box.height <= 0) {
+    await target.click({ timeout: 5000 }).catch(() => {});
+    return 'locator';
+  }
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy).catch(() => {});
+  await page.mouse.down().catch(() => {});
+  await page.mouse.up().catch(() => {});
+  return 'mouse';
+}
+
+/** Best-effort dismiss of the bottom-right "How can we help?"/emplifi chat bubble (and similar floating
+ *  widgets) that can overlay the PDP and swallow a click. The vendored dismissInterstitials covers
+ *  cookie/consent/close banners but NOT this chat widget. CONSERVATIVE: only clicks an explicit close/
+ *  minimize affordance so it can never OPEN the chat. Never throws. */
+async function dismissChatWidget(page: Page): Promise<void> {
+  const closer = page
+    .getByRole('button', { name: /close chat|minimize chat|close (the )?chat|hide chat|close help/i })
+    .or(page.locator('button[aria-label*="close chat" i], [class*="emplifi" i] button[aria-label*="close" i]'))
+    .filter({ visible: true })
+    .first();
+  if (await closer.isVisible({ timeout: 800 }).catch(() => false)) {
+    await closer.click({ timeout: 1500 }).catch(() => {});
+  }
+}
+
 /**
  * ★ STRUCTURAL, REDACTION-SAFE step-failure diagnostic (reuses the b2c OTHER-DIAG design + its
  * survival fix). Everything is structure / URL host+path / PII-filtered labels — NO page.content(),
@@ -486,6 +524,12 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         }
         await expect(addToCart, `add-${item}: Add to Cart affordance not found (NET-NEW selector — verify from diag)`).toBeVisible({ timeout: STEP_TIMEOUT });
 
+        // ── CLICK-FIDELITY PREP (this PR) ── (2) dismiss any floating "How can we help?"/emplifi chat
+        // widget that can overlay the button + swallow the click, then (3) let the PDP settle (bounded,
+        // signal-based networkidle — NOT a fixed sleep) so React has wired the add handler before we click.
+        await dismissChatWidget(page);
+        await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+
         // ═══ ADD-TO-CART — single click, arm on the in-place stepper transform, let the write settle ═══
         // GROUND TRUTH (Craig's screenshots): ONE click commits the add and TRANSFORMS the "Add to Cart"
         // button IN PLACE into a quantity stepper ([remove/trash] [qty] [+]; on search cards the "+" becomes
@@ -518,8 +562,15 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           .then((r) => safeLoc(r.url()))
           .catch(() => null);
 
-        // THE CLICK — a single click commits the add and begins the in-place transform.
-        await addToCart.click({ timeout: 5000 });
+        // ═══ THE CLICK — a REAL, TRUSTED pointer interaction (★ CLICK-FIDELITY FIX, this PR) ═══
+        // GROUND TRUTH (trace 925765): PDP navigation now works — the flow fails ON /shop/product/… with
+        // the large "Add to Cart" button PRESENT and clicked, yet cart0 + ZERO cart-writes. Craig's
+        // screenshots prove that same button commits for a human (click → [trash|1|+] stepper). Button and
+        // page are right; the plain locator.click() no-op'd the React add handler. Fire a genuine
+        // page.mouse move→down→up at the button's true on-screen center instead (realPointerClick). The
+        // arm-on-transform below is UNCHANGED and remains the success check — if the button transforms and
+        // a cart-write fires, the real click committed. clickMethod is recorded in the ADD diag.
+        const clickMethod = await realPointerClick(page, addToCart);
 
         // ARM ON THE TRANSFORM (the success signal): the plain "Add to Cart" button becomes a quantity
         // stepper — a remove/trash control, a quantity indicator, or a +/− increment. No hard wait —
@@ -553,7 +604,7 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         // Legible transform diagnostic — emitted UNCONDITIONALLY (rides Node stdout + trace_signals.console)
         // so a future failure shows exactly what did/didn't happen: did the stepper appear? cart-write? badge?
         const addDiag =
-          `[full-shop-flow] ADD ${item} match=${matchCount}(vis${visMatchCount}) ` +
+          `[full-shop-flow] ADD ${item} match=${matchCount}(vis${visMatchCount}) click=${clickMethod} ` +
           `btn={${btnStr}} transform={stepper${stepperSeen ? 1 : 0}/added${addedSeen ? 1 : 0}/` +
           `cw${cartWriteLoc ? 1 : 0}} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'} confirmed=${addConfirmed ? 1 : 0}` +
           (cartWriteLoc ? ` cwLoc=${cartWriteLoc.slice(0, 40)}` : '');
