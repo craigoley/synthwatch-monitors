@@ -217,65 +217,97 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       }
     });
 
-    // ---- STEP: select the McKinley store — GATES add-to-cart ---------------------------------------
-    // Diagnosis (live add-milk STEP-FAIL: li1 cart0 ful1 + a "Stores" control): wegmans.com/shop gates the
-    // Add-to-Cart affordance behind a SELECTED STORE. Establish McKinley once, before the add loop; store
-    // context persists for the session.
-    // ★ REUSE: the McKinley store-list/row selectors are lifted VERBATIM from meals2go-cheese-pizza-cart
-    // .spec.ts (input#store-search-input filter → app-wegmans-store / button.wegmans-store-container row,
-    // matched by the store NAME "Mckinley" — a stable anchor, not position). ★ CAVEAT: that is the
-    // meals2go.com app; wegmans.com/shop is a DIFFERENT app that may render a different store-picker DOM
-    // (the two may share the Wegmans store-picker component — unverified). So this is NET-NEW / UNVERIFIED
-    // for the shop-flow, like the other net-new steps: a name-based role/text fallback backs the reused
-    // selectors, and a failure emits the structural OTHER-DIAG (via runStep) so the first sandbox fire
-    // reveals the real wegmans.com store-picker DOM and corrects it (runbook #63).
+    // ---- STEP: select the McKinley store for PICKUP — GATES add-to-cart ----------------------------
+    // Diagnosis (live add-milk STEP-FAIL: cart0 ful1 + a Pickup/Delivery control): wegmans.com/shop gates
+    // the Add-to-Cart affordance behind a SELECTED fulfillment mode + store. Establish Pickup @ McKinley
+    // once, before the add loop; the fulfillment context persists for the session.
+    // ★ OBSERVED (driven live via Playwright MCP on the PUBLIC/anonymous www.wegmans.com/shop surface —
+    // this REPLACES the ported meals2go store-search selectors from #67, which did not transfer: that was
+    // the meals2go.com Angular app; www.wegmans.com/shop is a DIFFERENT, FULFILLMENT-FIRST flow):
+    //   1. /shop/search is reachable ANONYMOUSLY (Sign In present throughout) → the picker is PRE-LOGIN;
+    //      `li0` in the diag at this step is EXPECTED, not a lost session. Store context is per-browser-
+    //      context and carries into the already-logged-in session, so add-to-cart later sees both.
+    //   2. The header fulfillment control (button.selector-button, aria-haspopup="dialog") opens the
+    //      dialog "How would you like to shop?" — buttons aria-label Pickup / Delivery / In Store.
+    //   3. Pickup → dialog "Select Your Location": a "Enter City or Zip" textbox + a <ul> of store <li>s,
+    //      each row = a "Select" button + a "<Name> Store Details" link (href /stores/<slug>).
+    //   4. Typing McKinley's ZIP 14219 + Enter re-sorts the list so McKinley surfaces at the top —
+    //      REGARDLESS of the egress IP's default geolocation (the datacenter runner will geolocate to a
+    //      different default store than this authoring IP; the zip makes McKinley deterministic).
+    //   5. McKinley's row is anchored on its STABLE store slug (a[href="/stores/mckinley-ny"]), then its
+    //      "Select" button — a name/slug anchor, not position. Confirmation: the header fulfillment
+    //      context updates to "Pickup at McKinley".
+    // Name/slug-anchored + zero hard waits + armed on the real confirmation affordance. A failure still
+    // emits the structural OTHER-DIAG (via runStep) so an A/B picker variant self-reveals (runbook #63).
     abortIfOverCap();
     await runStep(page, 'select-store-mckinley', async () => {
       await page.goto('https://www.wegmans.com/shop/search?query=milk', { waitUntil: 'domcontentloaded' });
       await dismissInterstitials(page);
-      // Best-effort: open the store/fulfillment picker if it isn't already showing (the add-milk diag saw
-      // ful1, so it is often already present). Guarded — a no-op if the picker is already open.
-      const openPicker = page
-        .getByRole('button', { name: /choose (a|your) store|select (a )?store|set (your )?store|change store|find a store|store|pickup/i })
+      // Idempotent short-circuit: if the header already reads Pickup @ McKinley (e.g. a reused context),
+      // the fulfillment gate is satisfied — nothing to do (its current-store row carries no Select button).
+      const pickupAtMckinley = page.locator('.context-wrapper').filter({ hasText: /mckinley/i }).filter({ hasText: /pickup/i });
+      if (await isVisibleSafe(pickupAtMckinley)) return;
+
+      // (2) Open the "How would you like to shop?" fulfillment dialog if a Pickup choice isn't already
+      //     showing. On a fresh context it may auto-open; otherwise the header selector button opens it.
+      const pickupChoice = page
+        .getByRole('dialog')
+        .getByRole('button', { name: /^pickup$/i })
+        .or(page.locator('[role="dialog"] button[aria-label="Pickup" i]'))
         .filter({ visible: true })
         .first();
-      if (await isVisibleSafe(openPicker)) await openPicker.click({ timeout: 5000 }).catch(() => {});
-      await dismissInterstitials(page);
-      // REUSED (meals2go): filter the (virtualized) store list to McKinley via input#store-search-input,
-      // with a resilient role fallback for the wegmans.com store-picker.
-      const storeFilter = page
-        .locator('input#store-search-input')
-        .or(page.locator('app-store-selector input[type="text"], app-store-selector input'))
-        .or(page.getByRole('textbox', { name: /store|search|zip|city/i }))
-        .filter({ visible: true })
-        .first();
-      if (await isVisibleSafe(storeFilter)) {
-        await storeFilter.click({ timeout: 4000 }).catch(() => {});
-        await storeFilter.fill('Mckinley').catch(() => {});
+      if (!(await isVisibleSafe(pickupChoice))) {
+        const openPicker = page
+          .locator('button.selector-button[aria-haspopup="dialog"]')
+          .or(page.getByRole('button', { name: /^(in store|pickup|delivery)$|change store|set (your )?store|find a store/i }))
+          .filter({ visible: true })
+          .first();
+        if (await isVisibleSafe(openPicker)) await openPicker.click({ timeout: 5000 }).catch(() => {});
+        await dismissInterstitials(page);
       }
-      // REUSED (meals2go): click the McKinley store ROW (button.wegmans-store-container — the row, not the
-      // title span), matched by NAME; resilient name-based role/text fallback for the wegmans.com DOM.
-      const mckinleyStore = page
-        .locator('app-wegmans-store:has(span.store-title:text-is("Mckinley")) button.wegmans-store-container')
-        .or(page.locator('app-wegmans-store').filter({ hasText: /mckinley/i }).locator('button.wegmans-store-container'))
-        .or(page.getByRole('button', { name: /mckinley/i }))
+      // (3) Choose PICKUP → opens the "Select Your Location" store dialog.
+      await expect(
+        pickupChoice,
+        'select-store-mckinley: Pickup option not found in the fulfillment dialog (picker DOM may have changed — verify from the diag).',
+      ).toBeVisible({ timeout: STEP_TIMEOUT });
+      await pickupChoice.click({ timeout: 5000 });
+      await dismissInterstitials(page);
+
+      // (4) Type McKinley's ZIP so the store surfaces regardless of the egress IP's default geolocation.
+      const zip = page
+        .getByRole('dialog')
+        .locator('input[placeholder="Enter City or Zip" i]')
+        .or(page.getByRole('textbox', { name: /city or zip|zip|city/i }))
+        .filter({ visible: true })
+        .first();
+      if (await isVisibleSafe(zip)) {
+        await zip.click({ timeout: 4000 }).catch(() => {});
+        await zip.fill('14219').catch(() => {});
+        await zip.press('Enter').catch(() => {});
+      }
+      // (5) Select the McKinley row — anchored on its STABLE store slug (/stores/mckinley-ny), name-based
+      //     fallback. This armed anchor also proves the zip filter surfaced McKinley.
+      const mckinleySelect = page
+        .locator('[role="dialog"] li:has(a[href="/stores/mckinley-ny"]) button')
+        .or(page.locator('[role="dialog"] li').filter({ hasText: /mckinley/i }).getByRole('button', { name: /^select$/i }))
         .filter({ visible: true })
         .first();
       await expect(
-        mckinleyStore,
-        'select-store-mckinley: McKinley store row not found — NET-NEW for wegmans.com/shop (store-picker DOM likely differs from the reused meals2go pattern); verify from the diag.',
+        mckinleySelect,
+        'select-store-mckinley: McKinley "Select" row not found in the location dialog — verify from the diag (zip 14219 should surface it).',
       ).toBeVisible({ timeout: STEP_TIMEOUT });
-      await mckinleyStore.click({ timeout: 5000 });
+      await mckinleySelect.click({ timeout: 5000 });
       await dismissInterstitials(page);
-      // Confirm a McKinley store context is established (REUSED confirmation shape + resilient fallback).
+
+      // (6) Confirm the header fulfillment context now reads McKinley (the "Pickup at McKinley" affordance).
       const storeSet = page
-        .locator('#main-header-fulfillment-info, button.change-store-button')
+        .locator('.context-wrapper')
         .filter({ hasText: /mckinley/i })
-        .or(page.getByText(/mckinley/i))
+        .or(page.getByRole('button', { name: /mckinley/i }))
         .first();
       await expect(
         storeSet,
-        'select-store-mckinley: no McKinley store-context confirmation after selecting — verify from the diag.',
+        'select-store-mckinley: no McKinley fulfillment-context confirmation after selecting — verify from the diag.',
       ).toBeVisible({ timeout: STEP_TIMEOUT });
     });
 
