@@ -181,7 +181,7 @@ async function readCartCount(page: Page): Promise<number | null> {
  *  Bounding-box + attributes + class list are DOM structure, not PII. Guarded; null on any failure. */
 async function readAddButtonState(
   loc: Loc,
-): Promise<{ dis: boolean; ariaDis: string | null; ariaHid: string | null; onScreen: boolean; box: string; cls: string } | null> {
+): Promise<{ dis: boolean; ariaDis: string | null; ariaHid: string | null; onScreen: boolean; box: string; cls: string; aria: string } | null> {
   return loc
     .evaluate((el) => {
       const r = el.getBoundingClientRect();
@@ -194,6 +194,10 @@ async function readAddButtonState(
         onScreen: r.width > 0 && r.height > 0 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0,
         box: `${Math.round(r.width)}x${Math.round(r.height)}`,
         cls: (el.getAttribute('class') || '').slice(0, 100),
+        // The matched button's aria-label — DISPOSITIVE for the #925854 bug (the loose selector caught a
+        // recommended item's "Add …Shrimp Skewers… to LIST" mini-button). Surfacing it proves the selector
+        // now targets the CURRENT product + "to cart". Product name is public catalog text, not PII.
+        aria: (el.getAttribute('aria-label') || '').slice(0, 70),
       };
     })
     .catch(() => null);
@@ -503,14 +507,28 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
             `navigate and the direct product-URL fallback failed; the add must run on the PDP, never the search "+".`,
         ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
 
-        // ★ NET-NEW / UNVERIFIED: the authenticated Add-to-Cart affordance (a pickup fulfillment must be
-        // set; a store/fulfillment modal may intercept). Resilient: prefer a real "Add to Cart" button;
-        // if a fulfillment modal blocks it, choose PICKUP and retry. First-fire diag corrects this.
-        // ★ DIAG (unchanged resolution): split so the match COUNT (CASE 1: wrong instance) can be read;
-        //   `addToCart` is byte-for-byte the same locator/click as before — the diag only OBSERVES it.
+        // ★ ROOT-CAUSE FIX (trace 925854 DOM — DISPOSITIVE): the OLD selector — getByRole(name:/add to
+        // cart/i).or(button[class*=add][class*=cart]) with .first() — matched the WRONG control. On the
+        // milk PDP it caught a RECOMMENDED item's compact mini-button:
+        //   <div class="component--add-to-cart-mini-form add-to-cart">
+        //     <button class="default-add-button …" aria-label="Add 1 ea of Wegmans Gold Pan Garlic Herb
+        //                                                       Shrimp Skewers … to list"> …
+        // — a DIFFERENT product AND a DIFFERENT action ("to LIST", a wishlist add, not the cart), sitting
+        // in DOM BEFORE the main buy-box button, so .first() grabbed it → real click, but zero cart-write,
+        // cart0 forever. Every prior fix (PDP nav, real-pointer click) was interacting with this wrong
+        // button. Target the MAIN buy-box "Add to Cart" precisely, via two DOM-verified discriminators:
+        //   (1) ACTION = "to cart": the main button's accessible name carries "…to cart" — its real
+        //       dynamic aria-label is "Add <qty> ea of <CURRENT PRODUCT> to Cart" (or the literal "Add to
+        //       Cart" text). Requiring "to cart" REJECTS every "…to list" control by construction.
+        //   (2) NOT the recommended-item mini control: exclude `.component--add-to-cart-mini-form button`
+        //       (the compact wishlist add), so a recommendation with its own quick-add can't be picked.
+        // Note the old generic `button[class*=add][class*=cart]` branch is REMOVED — `.component--add-to
+        // -cart-mini-form` carries `add-to-cart` in its class and was exactly what let the mini-button in.
+        const notRecommendedMiniForm = page.locator('button:not(.component--add-to-cart-mini-form button)');
         const addToCartMatches = page
-          .getByRole('button', { name: /add to cart/i })
-          .or(page.locator('button[class*="add" i][class*="cart" i]'));
+          .getByRole('button', { name: /add\b.*\bto cart\b/i })
+          .or(page.locator('button[aria-label*="to cart" i]'))
+          .and(notRecommendedMiniForm);
         const addToCart = addToCartMatches.filter({ visible: true }).first();
         if (!(await isVisibleSafe(addToCart))) {
           const pickup = page.getByRole('button', { name: /pickup/i }).filter({ visible: true }).first();
@@ -599,7 +617,7 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         const cartIncremented = cartBefore != null && cartAfter != null && cartAfter > cartBefore;
         const addConfirmed = stepperSeen || !!cartWriteLoc || addedSeen || cartIncremented;
         const btnStr = btn
-          ? `dis${btn.dis ? 1 : 0}/aDis${btn.ariaDis ?? '-'}/aHid${btn.ariaHid ?? '-'}/on${btn.onScreen ? 1 : 0}/box${btn.box}/cls[${btn.cls}]`
+          ? `dis${btn.dis ? 1 : 0}/aDis${btn.ariaDis ?? '-'}/aHid${btn.ariaHid ?? '-'}/on${btn.onScreen ? 1 : 0}/box${btn.box}/aria[${btn.aria}]/cls[${btn.cls}]`
           : 'unread';
         // Legible transform diagnostic — emitted UNCONDITIONALLY (rides Node stdout + trace_signals.console)
         // so a future failure shows exactly what did/didn't happen: did the stepper appear? cart-write? badge?
