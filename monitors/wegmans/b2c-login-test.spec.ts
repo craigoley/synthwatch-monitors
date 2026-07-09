@@ -1,4 +1,4 @@
-import { test, expect, step, dismissInterstitials, type Page } from '../../lib/flow';
+import { test, expect, step, dismissInterstitials, credential, type Page } from '../../lib/flow';
 
 /**
  * Monitor: wegmans-b2c-login-test  —  ★ InfoSec ON-DEMAND TEST INSTRUMENT (ships DISABLED) ★
@@ -88,6 +88,29 @@ function requireSecret(name: string): string {
     );
   }
   return v;
+}
+
+type CredSource = 'credential' | 'env';
+/**
+ * ★ CREDENTIAL SOURCE — model-B cutover, STAGED (fallback + breadcrumb; the follow-up PR removes the
+ * fallback once proven). PREFER the per-monitor credential(role) — the dashboard editor's
+ * checks.login_credentials, decrypted + published by the runner as SW_CRED_<ROLE> (loginCredentials.ts
+ * credentialEnvKey === lib/flow.ts credential(): both `SW_CRED_${role.toUpperCase()}`). FALL BACK to the ACA
+ * env secret when credential() yields nothing — it FAIL-CLOSES (throws) when SW_CRED_<ROLE> is unset/empty,
+ * so the catch is the fallback trigger.
+ *
+ * ★ Anti-silent-fallback: the fallback masks ONLY a MISSING SW_CRED path (credential() threw). It does NOT
+ * mask a wrong-but-present value — a non-empty wrong credential passes credential()'s empty-guard and would
+ * fail the LOGIN (red) on validation, which is the intended loud signal. Returns which source supplied the
+ * value so the caller can log a value-free breadcrumb; Craig confirms source='credential' before the
+ * fallback is removed.
+ */
+function resolveCredential(role: string, envFallbackName: string): { value: string; source: CredSource } {
+  try {
+    return { value: credential(role), source: 'credential' };
+  } catch {
+    return { value: requireSecret(envFallbackName), source: 'env' };
+  }
 }
 
 /** host + pathname ONLY — drops query/fragment where B2C tokens (code/id_token) live, so evidence is
@@ -399,9 +422,18 @@ async function classify(page: Page, budgetMs: number): Promise<Verdict> {
 }
 
 test('Wegmans B2C login — InfoSec on-demand unblock test', async ({ page }) => {
-  // Creds up front → a missing secret fails fast + value-free (never logged).
-  const username = requireSecret('B2C_TEST_USER');
-  const password = requireSecret('B2C_TEST_PASS');
+  // Creds up front → a missing secret fails fast + value-free (never logged). Model-B cutover (STAGED):
+  // prefer the per-monitor credential(role); fall back to the ACA env secret until the credential() path
+  // is proven (see resolveCredential). Same code path every run (login-every-run, no session reuse).
+  const u = resolveCredential('username', 'B2C_TEST_USER');
+  const p = resolveCredential('password', 'B2C_TEST_PASS');
+  const username = u.value;
+  const password = p.value;
+  // ★ SOURCE BREADCRUMB (value-free): WHICH source supplied each credential. Emitted BEFORE the login
+  // attempt so it lands on every run in the runner CONTAINER LOGS (Node stdout) — the channel that survives
+  // a GREEN sensitive run (error_message is null on pass; no trace is persisted for a sensitive pass). Craig
+  // greps `cred-source` to confirm source=credential before the env fallback is removed. NEVER the value.
+  console.log(`[b2c-login-test] cred-source username=${u.source} password=${p.source}`);
   // The discriminator token (same secret the runner uses). May be unset → the validity gate reports
   // INCONCLUSIVE_HEADER_DROPPED rather than silently running an invalid test.
   const bypassToken = process.env.VERCEL_BYPASS_TOKEN;
