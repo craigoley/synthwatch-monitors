@@ -73,6 +73,16 @@ const STEP_TIMEOUT = 20_000;
 //   asserting before a slow-but-successful login has had time to render it. Bounded well under the runner's
 //   MAX_FLOW_MS=180s whole-flow cap. */
 const LOGIN_READY_MS = 60_000;
+// ★ CART PAGE URL — the real cart route is /cart, NOT /shop/cart. Hands-on recon (live logged-in session,
+//   2026-07-10): a hard GET to https://www.wegmans.com/shop/cart returns a 231-byte JSON SHELL
+//   ({"lvl0Categories":[]…}) with ZERO buttons — the shop SPA does not mount a cart route there, so nothing
+//   renders (no header, no meatball, no line items). https://www.wegmans.com/cart renders the full cart app
+//   (297 buttons, the "cart actions" ⋮ menu, the line items, the "View N selected items in my Cart" badge).
+//   This single wrong URL is the root cause the clear-cart ⋮ menu was "0-for-3": baseline-clear-cart (and
+//   teardown) navigated to the dead /shop/cart shell, so getByRole('button', {name:/cart actions/i}) found
+//   nothing, "Empty My Cart" rendered 0x, and the step STEP-FAILed (trace 935767). The header cart LINK's
+//   own href is "/cart". Used by verify-cart-4, return-cart, and clearCart (baseline + teardown). */
+const CART_URL = 'https://www.wegmans.com/cart';
 // ★ SPEC-OWNED per-action / per-navigation ceilings. The runner applies check.timeout_ms as the page
 //   DEFAULT (runner/index.ts page.setDefaultTimeout) — a PER-ACTION bound, NOT a whole-flow one. A mis-set
 //   check.timeout_ms (the 30000000ms=500min incident) made every UNBOUNDED action inherit a 500-min
@@ -1077,7 +1087,7 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     // ---- STEP: verify all 4 in cart (NET-NEW) ------------------------------------------------------
     abortIfOverCap();
     await runStep(page, 'verify-cart-4', async () => {
-      await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' });
+      await page.goto(CART_URL, { waitUntil: 'domcontentloaded' });
       await dismissInterstitials(page);
       // ★ NET-NEW / UNVERIFIED: cart line-item count. PREFER a cart network anchor once the first-fire
       // diag reveals the cart API (mirror meals2go-cheese-pizza-cart's cart-items API assertion). For now,
@@ -1135,7 +1145,7 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     // ---- STEP: return to cart (NET-NEW) -----------------------------------------------------------
     abortIfOverCap();
     await runStep(page, 'return-cart', async () => {
-      await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' });
+      await page.goto(CART_URL, { waitUntil: 'domcontentloaded' });
       await dismissInterstitials(page);
       await expect(page.locator('[class*="cart" i], [data-testid*="cart" i]').first(), 'return-cart: cart did not render').toBeVisible({ timeout: STEP_TIMEOUT });
     });
@@ -1216,7 +1226,7 @@ async function cartResidual(page: Page): Promise<number> {
   return -1; // UNKNOWN — no positive empty signal; never reported as empty
 }
 
-/** Best-effort dismiss the /shop/cart cookie-consent banner ("Our website uses cookies… [Close]") that sits
+/** Best-effort dismiss the /cart cookie-consent banner ("Our website uses cookies… [Close]") that sits
  *  at the BOTTOM of the cart page and can intercept the ⋮ meatball click OR overlay the "Delete Items"
  *  confirm dialog. SCOPED to a cookie/consent container so it can NEVER dismiss the confirm modal itself
  *  (a generic page-wide "close" could). Prefers "Close" (the banner's actual control), then accept/got-it.
@@ -1312,20 +1322,22 @@ async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 
  *  NOT a per-item Remove loop. Recon (trace 934649 + Craig's cart-page screenshot): the prior per-item
  *  remove loop fired ZERO removal requests — its /^remove$/ button selector never matched the real cart's
  *  remove control, so nothing cleared and the previous session's items PERSISTED and accumulated (cart hit 5
- *  → verify-cart-4 failed). The /shop/cart page has a MEATBALL menu (⋮, top-right of "My Cart") that opens a
+ *  → verify-cart-4 failed). The /cart page has a MEATBALL menu (⋮, top-right of "My Cart") that opens a
  *  dropdown (Print / Share / Add to Saved Lists / Empty My Cart); "Empty My Cart" (trash icon) is a SINGLE
  *  bulk clear — one action, exactly how a user empties the cart. Flow: dismiss cookie banner → open ⋮
  *  ROBUSTLY → VERIFY the menu opened ("Empty My Cart" visible) → click "Empty My Cart" → confirm "Yes,
  *  delete items" → VERIFY the cart is DURABLY 0 (server truth via readCartCount / cartResidual). One retry,
  *  then a loud STEP-FAIL with the residual count — NEVER a silent pass.
  *
- *  ★ ROOT CAUSE (trace 935321): the ⋮ meatball menu NEVER OPENED for the runner. The old code did a single
- *  plain meatball.click() that LANDS on the button but does NOT fire its React onClick → the dropdown items
- *  (Print/Share/Empty My Cart) render 0x → "Empty My Cart" was never clickable, and the code blindly tried to
- *  click a menuitem that wasn't there. Same click-lands-but-handler-doesn't-fire bug as add-to-cart. FIX:
- *  robustClickToOpen (the add-to-cart click-strategy ladder, generalized) opens the menu, VERIFY it opened
- *  before clicking, and the confirm targets the EXACT primary "Yes, delete items" (live screenshots: ⋮ →
- *  "Empty My Cart" → "Delete Items" dialog → "Yes, delete items"), never a broad affirmative. */
+ *  ★ TRUE ROOT CAUSE (hands-on recon, live logged-in cart, 2026-07-10 — corrects the earlier trace-935321
+ *  "React onClick doesn't fire" INFERENCE): the ⋮ menu was "0-for-3" because this function navigated to
+ *  https://www.wegmans.com/shop/cart, which is NOT the cart route — a hard GET there returns a 231-byte JSON
+ *  SHELL with ZERO buttons (the SPA mounts no cart there). The real cart is /cart (see CART_URL); on /cart a
+ *  PLAIN click opens the ⋮ menu instantly and "Empty My Cart" is a clean role=menuitem, the "Delete Items"
+ *  dialog's primary is "Yes, delete items" — all matching the selectors below. So the menu selectors, the
+ *  menu-open probe, and the confirm were correct all along; they simply never ran against a rendered page.
+ *  The robustClickToOpen ladder below is now belt-and-suspenders (its first plain-click rung already opens
+ *  the menu) — kept to absorb any headless pointer/focus quirk, but the URL fix (CART_URL) is what matters. */
 async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<void> {
   await step(label, async () => {
     // A native window.confirm (if Wegmans uses one instead of an in-page modal) would BLOCK the run — accept
@@ -1338,7 +1350,7 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       const MAX_ATTEMPTS = 2; // first attempt + one retry
       let remaining = -1;
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
+        await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
 
         // Already empty (badge 0 / empty-state) → no-op success. cartResidual never reports -1 as empty.
@@ -1422,7 +1434,7 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         // 5) VERIFY DURABLY EMPTY — FRESH nav + cart BADGE (server truth), not optimistic DOM. If the menu
         //    never opened this attempt (menuOpen=n), remaining will be non-zero → the loop RETRIES; if still
         //    non-empty after the retry, the fail-loud STEP-FAIL below fires with the residual count.
-        await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
+        await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
         remaining = await cartResidual(page);
         console.log(`[full-shop-flow] CLEAR-CART ${label} attempt=${attempt + 1} before=${before} remaining=${remaining}`);
