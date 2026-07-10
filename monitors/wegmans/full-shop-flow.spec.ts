@@ -184,7 +184,10 @@ async function readCartCount(page: Page): Promise<number | null> {
   const cartCtl = page.getByRole('link', { name: /cart/i }).or(page.getByRole('button', { name: /cart/i })).first();
   const al = await cartCtl.getAttribute('aria-label').catch(() => null);
   if (al) {
-    const m = al.match(/(\d+)\s*(item|product)/i);
+    // ★ FALSE-NEGATIVE FIX: the real cart-link aria-label is "View 13 selected items in my Cart" — a word
+    // ("selected") sits between the number and "items", so the old /(\d+)\s*(item|product)/ never matched and
+    // returned null (cart=?). Allow an optional intervening word and plural item/product.
+    const m = al.match(/(\d+)\s+(?:\w+\s+)?(?:items?|products?)/i);
     if (m) return parseInt(m[1], 10);
   }
   return null;
@@ -298,7 +301,12 @@ function isCartWrite(method: string, url: string, status: number): boolean {
   } catch {
     return false;
   }
-  const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+  // ★ FALSE-NEGATIVE FIX: the REAL production cart-write is a PUT to
+  // api.digitaldevelopment.wegmans.CLOUD/commerce/cart/carts/lineitems/quantity (200) — "digitaldevelopment"
+  // is the Wegmans Digital team's PRODUCTION APIM host, NOT a dev env. The old gate matched only
+  // *.wegmans.COM, so it REJECTED the real successful cart-write and logged cartWrite=n. Accept *.wegmans.cloud
+  // too (still scoped to wegmans commerce hosts + the cart path — never analytics/3rd-party).
+  const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
   return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(url) && status < 500;
 }
 
