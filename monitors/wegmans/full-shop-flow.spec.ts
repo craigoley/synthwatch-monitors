@@ -55,9 +55,18 @@ const SHOPPING_ITEMS = ['milk', 'eggs', 'bread', 'bananas'] as const;
 const B2C_HOST = 'myaccount.wegmans.com';
 const BYPASS_HEADER = 'x-vercel-protection-bypass';
 /** Hard wall-clock cap: abort to teardown before this. Kept well under the runner's per-run budget AND
- *  the 15-min tick so a run can't bleed into the next tick (concurrency axis b). */
-const RUN_CAP_MS = 200_000;
+ *  the 15-min tick so a run can't bleed into the next tick (concurrency axis b).
+ *  ★ TEMPORARY / DIAGNOSTIC (measurement pass): raised 200_000 → 600_000 so a legitimately-long authenticated
+ *  flow runs to its natural end and the trace is NOT truncated while we map where time goes. TUNE BACK to a
+ *  production budget once the real completion time is measured. NOTE: the BINDING truncation is RUNNER-SIDE —
+ *  runner/index.ts MAX_FLOW_MS = 180_000 kills the browser run first; that must be raised too (companion
+ *  runner change) or this spec cap has no effect. */
+const RUN_CAP_MS = 600_000;
 const STEP_TIMEOUT = 20_000;
+
+// ── DIAGNOSTIC TELEMETRY (measurement pass) — per-step timing accumulator, reset per run at test start.
+//    Module-scoped so the shared runStep() can push to it; the test reads it for the FLOW-SUMMARY line. ──
+const stepTimings: Array<{ name: string; ms: number; failed: boolean }> = [];
 const LOGGED_IN_AFFORDANCE_RX = /account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i;
 
 // ── Redaction-safe helpers (inlined; a spec cannot import another spec — lib/* won't resolve at runtime) ──
@@ -605,9 +614,16 @@ async function captureStepDiag(page: Page, stepName: string): Promise<{ full: st
  *  to the persisted channels (page-console → trace_signals.console; thrown error → error_message). */
 async function runStep(page: Page, name: string, body: () => Promise<void>): Promise<void> {
   return step(name, async () => {
+    const t0 = Date.now(); // ★ per-step timing (measurement pass)
     try {
       await body();
+      const ms = Date.now() - t0;
+      stepTimings.push({ name, ms, failed: false });
+      console.log(`[full-shop-flow] STEP-TIMING ${name} ${ms}ms`);
     } catch (err) {
+      const ms = Date.now() - t0;
+      stepTimings.push({ name, ms, failed: true });
+      console.log(`[full-shop-flow] STEP-TIMING ${name} ${ms}ms FAILED`);
       const d = await captureStepDiag(page, name).catch(() => ({ full: '', compact: '' }));
       console.log(`[full-shop-flow] STEP-FAIL ${name} DIAG ${d.full}`); // Node stdout (deep-dive)
       if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {}); // → trace_signals.console
@@ -633,6 +649,34 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       throw new Error(`[full-shop-flow] run-cap ${Math.round(RUN_CAP_MS / 1000)}s exceeded — aborting to teardown (concurrency guard).`);
     }
   };
+
+  // ── DIAGNOSTIC TELEMETRY (measurement pass) ──────────────────────────────────────────────────────
+  // Reset the per-run step-timing accumulator, and attach a BROAD cart/order/basket/item API listener so we
+  // capture the REAL cart-write endpoint (earlier filters may have MISSED it — capture broadly). Emits one
+  // CART-API line per matching call + counts non-GET writes. Structural only (method/status/host+path).
+  stepTimings.length = 0;
+  const cartApiCalls: Array<{ method: string; status: number; path: string }> = [];
+  let cartWriteCount = 0;
+  page.on('response', (resp) => {
+    try {
+      const method = resp.request().method();
+      const url = resp.url();
+      let host = '';
+      try {
+        host = new URL(url).host.toLowerCase();
+      } catch {
+        return;
+      }
+      const onWegmans = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+      if (!onWegmans || !/\/(cart|basket|order|line-?items?|cart-items|checkout|add)/i.test(url)) return;
+      const status = resp.status();
+      cartApiCalls.push({ method, status, path: safeLoc(url) });
+      if (method !== 'GET' && method !== 'HEAD' && status < 500) cartWriteCount++;
+      console.log(`[full-shop-flow] CART-API ${method} ${status} ${safeLoc(url)}`);
+    } catch {
+      /* telemetry never breaks the flow */
+    }
+  });
 
   // Reuse b2c: the runner injects the bypass header for www.wegmans.com but NOT myaccount.wegmans.com
   // (PROTECTED_BYPASS_HOSTS omits it) — inject it host-scoped here so the login redirect carries it.
@@ -855,6 +899,15 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       ).toBeTruthy();
     });
 
+    // ★ STORE-STATE @before-add (measurement): which store/mode is the session ACTUALLY bound to right
+    //    before the first add — surfaces the 108/48/84 mess. (The store step already logged FULFILLMENT-STATE
+    //    @after-store-selection.) Structural: store number + mode + bound boolean only.
+    {
+      const sb = await readFulfillmentState(page).catch(() => ({ store: '?', mode: '?', cart: '?', src: '?' }));
+      const bound = sb.mode === 'pickup' && (sb.store === '84' || /mckinley/i.test(sb.store)) ? 'y' : 'n';
+      console.log(`[full-shop-flow] STORE-STATE @before-add store=${sb.store} mode=${sb.mode} bound=${bound}`);
+    }
+
     // ---- STEP(s): search + add each item (REUSED search selectors; NET-NEW add-to-cart) ------------
     for (const item of SHOPPING_ITEMS) {
       abortIfOverCap();
@@ -940,7 +993,19 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         // success it records which strategy committed; on total failure it throws with the full ladder map
         // (every rung's reactHandler / click / transform / cartWrite) — a maximally diagnostic fire either
         // way. runStep wraps a throw into error_message + trace_signals.
+        const cwBefore = cartWriteCount; // ★ CART-STATE: per-item cart-write delta (measurement)
         await addToCartLadder(page, item, addToCart, addToCartMatches);
+        // ★ CART-STATE after this add: does the UI transform correspond to a REAL cart entry (count badge +
+        //    a cart-write network call), or is the UI optimistic while the cart stays empty? Structural only.
+        const countBadge = await readCartCount(page).catch(() => null);
+        const transformSeen = await isVisibleSafe(
+          page
+            .locator('[class*="stepper" i], [class*="quantity" i], [data-testid*="quantity" i]')
+            .or(page.getByRole('button', { name: /^\s*[-+]\s*$|remove|delete|increment|decrement/i })),
+        );
+        console.log(
+          `[full-shop-flow] CART-STATE after=${item} countBadge=${countBadge ?? '?'} cartWrite=${cartWriteCount > cwBefore ? 'y' : 'n'} transform=${transformSeen ? 'y' : 'n'}`,
+        );
       });
     }
 
@@ -1004,6 +1069,23 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     //      never throws; clear-cart THEN logout. No lock to release (option 3). --------------------------
     await clearCart(page).catch(() => {});
     await logout(page).catch(() => {});
+
+    // ★ FLOW-SUMMARY (measurement) — the whole run in one line for the trace: total duration, per-step
+    //    durations, final cart count, cart-writes + cart-API calls seen, final store/mode, and which step
+    //    failed (if any). This is the map that picks the next fix. Structural only; best-effort (never throws).
+    try {
+      const totalMs = Date.now() - startedAt;
+      const finalCart = await readCartCount(page).catch(() => null);
+      const fsEnd = await readFulfillmentState(page).catch(() => ({ store: '?', mode: '?', cart: '?', src: '?' }));
+      const failed = stepTimings.filter((s) => s.failed).map((s) => s.name).join(',') || 'none';
+      const steps = stepTimings.map((s) => `${s.name}=${s.ms}${s.failed ? '!' : ''}`).join(' ');
+      console.log(
+        `[full-shop-flow] FLOW-SUMMARY totalMs=${totalMs} finalCart=${finalCart ?? '?'} cartWrites=${cartWriteCount} ` +
+          `cartApis=${cartApiCalls.length} store=${fsEnd.store} mode=${fsEnd.mode} failedStep=${failed} steps=[${steps}]`,
+      );
+    } catch {
+      /* summary is best-effort telemetry — never mask the real outcome */
+    }
   }
 });
 
