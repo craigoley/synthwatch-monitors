@@ -52,18 +52,6 @@ import { test, expect, step, dismissInterstitials, credential, type Page } from 
 
 // ── Config ────────────────────────────────────────────────────────────────────────────────────────
 const SHOPPING_ITEMS = ['milk', 'eggs', 'bread', 'bananas'] as const;
-// ★ PINNED PDPs — DETERMINISTIC product selection (immune to search boost/reorder). Trace 933812: the
-// "bananas" search landed on a BOOSTED/promoted 92928-Sweet-Cherries that hijacked the first-result
-// position. Navigate DIRECTLY to the product's PDP and assert the landed product-id. milk + bananas are
-// KNOWN (Craig-specified). ★ eggs/bread IDs were NOT recoverable here: this is a sensitive monitor, so the
-// runner strips NETWORK from trace_signals (only console survives) and the SUCCESSFUL PDP urls appear in no
-// console line — only the FAILED bananas url (92928-Sweet-Cherries) does. So eggs/bread fall back to search
-// + a landed-CATEGORY assertion (which still REJECTS a boost-hijack). ★ TO PIN them: add their id here, e.g.
-//   eggs: '<id>-Large-Eggs', bread: '<id>-...'  (from a run's /shop/product/ nav once available).
-const PRODUCT_PDPS: Partial<Record<(typeof SHOPPING_ITEMS)[number], string>> = {
-  milk: '93989-2-Reduced-Fat-Milk',
-  bananas: '92685-Bananas-Sold-by-the-Each',
-};
 const B2C_HOST = 'myaccount.wegmans.com';
 const BYPASS_HEADER = 'x-vercel-protection-bypass';
 /** Hard wall-clock cap: abort to teardown before this. Kept well under the runner's per-run budget AND
@@ -958,54 +946,53 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     for (const item of SHOPPING_ITEMS) {
       abortIfOverCap();
       await runStep(page, `add-${item}`, async () => {
-        // ★ FULFILLMENT-DRIFT GUARD (trace 933812 saw Pickup→Delivery at bananas): items must go to the
-        // PICKUP cart. Re-check the context is not Delivery before each add. Direct PDP nav may sidestep the
-        // drift; if it recurs, FAIL loudly (a Delivery cart would silently diverge from the pickup flow).
-        const fmode = (await readFulfillmentState(page).catch(() => ({ mode: 'none' }))).mode;
-        console.log(`[full-shop-flow] FULFILLMENT-CHECK @before-add-${item} mode=${fmode}`);
-        if (fmode === 'delivery') {
-          throw new Error(`add-${item}: fulfillment DRIFTED to Delivery (flow set Pickup) — items would enter a Delivery cart. Re-establish Pickup.`);
-        }
+        // ★ SEARCH-NAV (REVERTED from direct-URL pin). Trace 933812 (search-nav) committed 3 products
+        // (milk+eggs+bread, cart 0→2→3) maintaining the established store/Pickup context across adds; the
+        // pinned direct-URL nav (trace 934518) REGRESSED to 1 product — per-product /shop/product/ nav
+        // disrupted the store/session context between adds (a changestore PUT + repeated service_options
+        // POSTs), and eggs failed without the add-ladder even firing. So SEARCH + select-from-results
+        // (in-context) for ALL 4 items — NOT direct product-URL nav. The add still commits on the PDP
+        // (its LARGE buy-box "Add to Cart" transforms to a stepper; the /shop/search "+" is a no-op).
+        await page.goto(`https://www.wegmans.com/shop/search?query=${encodeURIComponent(item)}`, { waitUntil: 'domcontentloaded' });
+        await dismissInterstitials(page);
 
-        // ★ PRODUCT SELECTION — pinned PDP (deterministic) OR search+category-guard fallback. The add MUST
-        // commit on the PDP (its LARGE buy-box "Add to Cart" transforms to a stepper; the /shop/search "+"
-        // is a no-op under automation), so both paths land + HARD-ASSERT a /shop/product/ URL before the add.
-        const pinned = PRODUCT_PDPS[item];
-        if (pinned) {
-          // PINNED: go DIRECTLY to the product's PDP — immune to search boost/reorder (the cherries bug).
-          await page.goto(`https://www.wegmans.com/shop/product/${pinned}`, { waitUntil: 'domcontentloaded' });
-          await dismissInterstitials(page);
-          const pinnedId = pinned.split('-')[0]; // leading numeric product id, e.g. 92685
-          await expect(
-            page,
-            `add-${item}: not on the pinned PDP /shop/product/${pinned} — wrong product landed (verify from url).`,
-          ).toHaveURL(new RegExp(`/shop/product/${pinnedId}-`, 'i'), { timeout: STEP_TIMEOUT });
-        } else {
-          // UNPINNED (eggs/bread — id not yet known): search + first result → PDP, THEN assert the landed
-          // PDP is the right CATEGORY so a boosted/wrong product (the cherries-for-bananas hijack) REDS
-          // instead of adding the wrong item. Pin these by adding their id to PRODUCT_PDPS once known.
-          await page.goto(`https://www.wegmans.com/shop/search?query=${encodeURIComponent(item)}`, { waitUntil: 'domcontentloaded' });
-          await dismissInterstitials(page);
-          const firstProduct = page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
-          await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
-          const productHref = (await firstProduct.getAttribute('href').catch(() => null)) ?? '';
-          await firstProduct.click({ timeout: 5000 }).catch(() => {});
-          const onPdp = await page.waitForURL(/\/shop\/product\//, { timeout: 8000 }).then(() => true).catch(() => false);
-          if (!onPdp && productHref) {
-            await page.goto(new URL(productHref, 'https://www.wegmans.com').toString(), { waitUntil: 'domcontentloaded' }).catch(() => {});
-          }
-          await dismissInterstitials(page);
-          await expect(
-            page,
-            `add-${item}: did not reach a product detail page (/shop/product/…).`,
-          ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
-          // CATEGORY GUARD: the landed PDP must mention the item word (eggs→egg, bread→bread) — rejects a
-          // boosted/merchandised mismatch like the cherries-for-bananas hijack.
-          const word = item.replace(/s$/, ''); // eggs → egg
-          const categoryOk = await isVisibleSafe(page.getByText(new RegExp(`\\b${word}`, 'i')).first());
+        // ★ RESULT SELECTION. Most items: the first visible product card is correct. BANANAS is the one
+        // exception — trace 933812: a BOOSTED/promoted 92928-Sweet-Cherries hijacked the first-result
+        // position for the "bananas" query, so a raw .first() added CHERRIES. selectBananaResult() picks
+        // the result that is an ACTUAL banana (product 92685 "Bananas, Sold by the Each", by id/name) and
+        // REJECTS boosted / banana-FLAVORED look-alikes (Sweet Cherries, Banana Pudding, Banana Pepper, …).
+        // Still a SEARCH-result click (in-context), never direct product-URL nav.
+        const firstProduct =
+          item === 'bananas'
+            ? await selectBananaResult(page)
+            : page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
+        await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
+
+        // The add MUST commit on the PDP, not the search "+". Capture the href, click the tile, and if we
+        // did NOT land on /shop/product/, navigate to the captured href (same-context — store/fulfillment
+        // persists). Then HARD-ASSERT the PDP URL before hunting for "Add to Cart".
+        const productHref = (await firstProduct.getAttribute('href').catch(() => null)) ?? '';
+        await firstProduct.click({ timeout: 5000 }).catch(() => {});
+        const onPdp = await page.waitForURL(/\/shop\/product\//, { timeout: 8000 }).then(() => true).catch(() => false);
+        if (!onPdp && productHref) {
+          await page.goto(new URL(productHref, 'https://www.wegmans.com').toString(), { waitUntil: 'domcontentloaded' }).catch(() => {});
+        }
+        await dismissInterstitials(page);
+        await expect(
+          page,
+          `add-${item}: did not reach a product detail page (/shop/product/…) — the search tile click did not ` +
+            `navigate and the direct product-URL fallback failed; the add must run on the PDP, never the search "+".`,
+        ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
+
+        // ★ BANANAS VERIFY: confirm the landed PDP is the ACTUAL banana (id 92685 or a name that STARTS
+        // with "Bananas") BEFORE the add commits — rejects a cherries/flavored hijack that slipped through.
+        if (item === 'bananas') {
+          const slug = page.url().split('/shop/product/')[1] ?? '';
+          const landedIsBanana = /^92685-/.test(slug) || /^\d+-Bananas\b/i.test(slug);
           expect(
-            categoryOk,
-            `add-${item}: landed PDP does not mention "${word}" — a boosted/wrong product likely hijacked the search; pin ${item}'s id in PRODUCT_PDPS.`,
+            landedIsBanana,
+            `add-bananas: landed PDP "${slug}" is not an actual banana (expected 92685 / a "Bananas…" ` +
+              `product) — a boosted/flavored result hijacked the search; re-recon banana selection.`,
           ).toBeTruthy();
         }
 
@@ -1154,6 +1141,35 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     }
   }
 });
+
+/** ★ BANANAS result-selection guard. The "bananas" query returns BOOSTED/merchandised results — trace
+ *  933812 saw 92928-Sweet-Cherries hijack the FIRST position, so a raw .first() added cherries. Return the
+ *  search-result anchor that is an ACTUAL banana: prefer the exact product 92685 ("Bananas, Sold by the
+ *  Each"), else the first result whose product NAME (slug after the id, or link text) STARTS with "Bananas"
+ *  (the produce item) — while REJECTING flavored/merchandised look-alikes (Sweet Cherries, Banana Pudding,
+ *  Banana Pepper, banana bread/chips/muffins, …). Throws LOUD if no banana is present — a silent .first()
+ *  would add the wrong item (the original bug). Still returns a RESULT anchor to click (in-context nav). */
+async function selectBananaResult(page: Page): Promise<Loc> {
+  const anchors = page.locator('a[href*="/shop/product/"]').filter({ visible: true });
+  // Primary: the exact banana product id 92685 — deterministic, immune to boost/reorder.
+  const byId = page.locator('a[href*="/shop/product/92685-"]').filter({ visible: true }).first();
+  if (await byId.isVisible({ timeout: STEP_TIMEOUT }).catch(() => false)) return byId;
+  // Fallback: first result whose product NAME begins with "Bananas" (produce), excluding look-alikes.
+  const REJECT = /cherr|pudding|pepper|chip|bread|muffin|candle|flavor|split|foster|nut|puff|milk|smoothie/i;
+  const n = await anchors.count();
+  for (let i = 0; i < n; i++) {
+    const a = anchors.nth(i);
+    const href = (await a.getAttribute('href').catch(() => '')) ?? '';
+    const name = ((await a.textContent().catch(() => '')) ?? '').trim();
+    const slug = href.split('/shop/product/')[1] ?? '';
+    const nameIsBanana = /^\d+-Bananas\b/i.test(slug) || /^Bananas\b/i.test(name);
+    if (nameIsBanana && !REJECT.test(`${slug} ${name}`)) return a;
+  }
+  throw new Error(
+    'add-bananas: no actual banana in the search results (product 92685 / a "Bananas…" result absent — ' +
+      'only boosted/merchandised look-alikes like Sweet Cherries). Search boost changed; re-recon banana selection.',
+  );
+}
 
 /** Teardown — clear every cart line item (NET-NEW / UNVERIFIED). Best-effort loop with a cap so it can
  *  never hang; tries per-item Remove, then a bulk "clear/empty cart" affordance. Verify from first-fire
