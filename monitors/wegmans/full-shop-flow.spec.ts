@@ -1230,19 +1230,53 @@ async function cartResidual(page: Page): Promise<number> {
  *  at the BOTTOM of the cart page and can intercept the ⋮ meatball click OR overlay the "Delete Items"
  *  confirm dialog. SCOPED to a cookie/consent container so it can NEVER dismiss the confirm modal itself
  *  (a generic page-wide "close" could). Prefers "Close" (the banner's actual control), then accept/got-it.
- *  Bounded, optional (no-op if absent), never throws. */
-async function dismissCookieBanner(page: Page): Promise<void> {
+ *  Bounded, optional (no-op if absent), never throws. Returns a status the clear-cart telemetry logs:
+ *  'absent' (no banner), 'dismissed' (banner present + close clicked), 'present' (present but no closer). */
+async function dismissCookieBanner(page: Page): Promise<'absent' | 'dismissed' | 'present'> {
   const banner = page
     .locator('[class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i], [aria-label*="cookie" i]')
     .filter({ visible: true })
     .first();
-  if (!(await banner.isVisible({ timeout: 800 }).catch(() => false))) return;
+  if (!(await banner.isVisible({ timeout: 800 }).catch(() => false))) return 'absent';
   const btn = banner
     .getByRole('button', { name: /close|accept( all)?( cookies)?|got it|^ok$|i (agree|accept)|dismiss/i })
     .or(banner.getByRole('link', { name: /close|accept|got it|dismiss/i }))
     .filter({ visible: true })
     .first();
-  await btn.click({ timeout: 1500 }).catch(() => {});
+  const clicked = await btn.click({ timeout: 1500 }).then(() => true).catch(() => false);
+  return clicked ? 'dismissed' : 'present';
+}
+
+/** ★ CLEAR-CART PER-SUBSTEP TELEMETRY (this PR). Emit one `CLEAR-STEP <label> <sub> <result> <detail>`
+ *  line to BOTH Node stdout (runner container logs — the deep-dive channel) AND the page console →
+ *  trace_signals.console, so the breadcrumb SURVIVES into the persisted failure trace (compact ≤195, the
+ *  redaction-safe channel). `label` tags baseline-clear vs teardown. Returns the compact line so clearCart
+ *  can accumulate a breadcrumb for the CLEAR-SUMMARY line + the thrown error_message. Structural only —
+ *  URL host+path / counts / booleans, never creds/token/DOM/PII. Never throws. */
+async function clearStep(page: Page, label: string, sub: string, result: string, detail = ''): Promise<string> {
+  const line = `[full-shop-flow] CLEAR-STEP ${label} ${sub} ${result}${detail ? ' ' + detail : ''}`;
+  console.log(line);
+  const compact = line.slice(0, 195);
+  await page.evaluate((m) => console.warn(m), compact).catch(() => {});
+  return compact;
+}
+
+/** True if a response is a wegmans cart-CLEAR/empty/delete WRITE — the transform-independent proof the
+ *  "Yes, delete items" confirm actually reached the server. Reuses the isCartWrite gate (non-GET to a
+ *  *.wegmans.(com|cloud)/wegapi cart/basket/lineitems path, status<500) and ALSO accepts an explicit
+ *  DELETE method or an empty/clear path segment (an "Empty My Cart" bulk clear is typically a DELETE to
+ *  the cart/lineitems collection or a POST to a clear/empty endpoint). Host+path/method only. */
+function isCartClearWrite(method: string, url: string, status: number): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  if (isCartWrite(method, url, status)) return true;
+  let host = '';
+  try {
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return false;
+  }
+  const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
+  return onWegmansApi && /\/(cart|basket|line-?items?)/i.test(url) && (method === 'DELETE' || /empty|clear|delete/i.test(url)) && status < 500;
 }
 
 /** ★ ROBUST-CLICK LADDER for a React control that ACCEPTS a click but whose onClick does not fire on a plain
@@ -1337,115 +1371,65 @@ async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 
  *  dialog's primary is "Yes, delete items" — all matching the selectors below. So the menu selectors, the
  *  menu-open probe, and the confirm were correct all along; they simply never ran against a rendered page.
  *  The robustClickToOpen ladder below is now belt-and-suspenders (its first plain-click rung already opens
- *  the menu) — kept to absorb any headless pointer/focus quirk, but the URL fix (CART_URL) is what matters.
- *
- *  ★ PER-SUBSTEP TELEMETRY (this PR): after the /cart fix the menu OPENS ("Empty My Cart" renders) but the
- *  cart still shows 5 — the failure MOVED DOWNSTREAM of menu-open and we kept GUESSING which sub-step breaks
- *  from ambient keyword counts. This function now emits a CLEAR-STEP <substep> OK/FAIL <detail> line at EVERY
- *  sub-step (NAV, COOKIE-BANNER, INITIAL-COUNT, MEATBALL-FOUND, MENU-OPEN, EMPTY-CLICKED, DIALOG-APPEARED,
- *  CONFIRM-CLICKED, DELETE-FIRED, FINAL-COUNT) plus a CLEAR-SUMMARY naming the failing sub-step + initial/final
- *  count — to Node stdout AND the page console (→ trace) AND the thrown error (→ error_message), tagged by
- *  `label` (baseline vs teardown). One fire now pinpoints the exact break instead of another blind patch. */
+ *  the menu) — kept to absorb any headless pointer/focus quirk, but the URL fix (CART_URL) is what matters. */
 async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<void> {
   await step(label, async () => {
-    // ── PER-SUBSTEP TELEMETRY (this PR) ────────────────────────────────────────────────────────────────
-    // We've patched clear-cart blind 3-4x, each time GUESSING which sub-step failed from ambient keyword
-    // counts because the clear emitted NO per-step breadcrumb the team could SEE. The prior CLEAR-CART
-    // console.log lines landed only in Node STDOUT, which the trace the team reads (trace_signals.console =
-    // PAGE console) does NOT capture — that's why fires showed "no clear-cart sub-step telemetry". Fix:
-    // clearStep() emits every sub-step to ALL THREE persisted channels — Node stdout (deep-dive), the PAGE
-    // console (→ trace_signals.console, mirrored per-line ≤195 so each survives even if a later step hangs),
-    // AND a breadcrumb that rides the thrown error (→ error_message). One fire now pinpoints the exact break.
-    // `tag` (= label) distinguishes the BASELINE clear from the TEARDOWN clear in a shared trace. Structural
-    // only — URL host+path, booleans, control labels, network method/status — never creds/token/PII.
-    const tag = label;
-    const breadcrumb: string[] = [];
-    const clearStep = (substep: string, result: string, detail = '') => {
-      const line = `[full-shop-flow] CLEAR-STEP ${tag} ${substep} ${result}${detail ? ' ' + detail : ''}`;
-      console.log(line); // Node stdout (deep-dive)
-      breadcrumb.push(`${substep}=${result}${detail ? '(' + detail.trim() + ')' : ''}`);
-      void page.evaluate((m) => console.warn(m), line.slice(0, 195)).catch(() => {}); // → trace_signals.console
-    };
-
-    // A cart-clear NETWORK write (non-GET to a wegmans commerce cart/basket/lineitem/empty/clear/delete path,
-    // status < 500) is the transform-independent proof the SERVER actually emptied the cart — distinguishing
-    // "confirm click missed" (no write) from "server didn't persist" (write fired, count stayed). Keyed on
-    // method + host + path only, never the body.
-    const isClearWrite = (method: string, url: string, status: number): boolean => {
-      if (method === 'GET' || method === 'HEAD') return false;
-      let host = '';
-      try {
-        host = new URL(url).host.toLowerCase();
-      } catch {
-        return false;
-      }
-      const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
-      return onWegmansApi && /\/(cart|basket|line-?items?|cart-items|empty|clear|delete)/i.test(url) && status < 500;
-    };
-    let phase = 'nav';
-    const clearWrites: Array<{ phase: string; method: string; status: number; path: string }> = [];
-    const onClearResp = (resp: any) => {
-      try {
-        if (isClearWrite(resp.request().method(), resp.url(), resp.status())) {
-          clearWrites.push({ phase, method: resp.request().method(), status: resp.status(), path: safeLoc(resp.url()) });
-        }
-      } catch {
-        /* telemetry never breaks the flow */
-      }
-    };
-    page.on('response', onClearResp);
-
     // A native window.confirm (if Wegmans uses one instead of an in-page modal) would BLOCK the run — accept
     // it. An in-page role=dialog is handled by clicking its confirm button below. Registered once; removed in
     // finally so we don't stack handlers or leak across the retry.
     page.on('dialog', (d) => {
       void d.accept().catch(() => {});
     });
-
-    // State the CLEAR-SUMMARY reads (hoisted so the summary is accurate on every exit path).
-    let failedSubstep = 'none';
-    let initialCount = -1;
-    let remaining = -1;
-    const emitSummary = (result: string) => {
-      const s =
-        `[full-shop-flow] CLEAR-SUMMARY ${tag} result=${result} failedSubstep=${failedSubstep} ` +
-        `initial=${initialCount} final=${remaining} writes=${clearWrites.length} breadcrumb=[${breadcrumb.join(' ')}]`;
-      console.log(s);
-      void page.evaluate((m) => console.warn(m), s.slice(0, 195)).catch(() => {});
-      return s;
+    // ★ DELETE-FIRED LISTENER (this PR) — the transform-independent proof the confirm reached the server.
+    //   Records every wegmans cart-CLEAR/empty/delete WRITE (method/status/path) so a fire can distinguish
+    //   "confirm never fired a request" (client-side break: menu/empty/dialog/confirm) from "delete fired
+    //   but the count stayed >0" (server did not persist). Structural only; never breaks the flow.
+    const clearWrites: Array<{ method: string; status: number; path: string }> = [];
+    const onClearResp = (resp: any) => {
+      try {
+        const m = resp.request().method();
+        if (isCartClearWrite(m, resp.url(), resp.status())) {
+          clearWrites.push({ method: m, status: resp.status(), path: safeLoc(resp.url()) });
+        }
+      } catch {
+        /* telemetry never breaks the flow */
+      }
     };
-
+    page.on('response', onClearResp);
     try {
       const MAX_ATTEMPTS = 2; // first attempt + one retry
+      let remaining = -1;
+      let initialCount = -1; // the N to clear (from the first attempt) — for CLEAR-SUMMARY
+      let failedAt = 'unknown'; // the last sub-step that did not reach OK — for CLEAR-SUMMARY + the throw
+      const crumbs: string[] = []; // accumulate the CLEAR-STEP lines → thrown error_message carries the breadcrumb
+      const crumb = async (sub: string, result: string, detail = '') => {
+        crumbs.push(await clearStep(page, label, sub, result, detail));
+      };
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const A = `attempt${attempt + 1}`;
+        const tag = `attempt=${attempt + 1}`;
 
-        // ── 1) NAV — land on the REAL cart page (/cart, not the dead /shop/cart shell). Log the URL landed on.
-        phase = 'nav';
+        // ── SUB-STEP 1: NAV — navigate to the cart page + log the URL we actually landed on ──────────────
+        failedAt = 'NAV';
         const navOk = await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).then(() => true).catch(() => false);
-        const onCart = /\/cart\b/.test(page.url()) && !/\/shop\/cart\b/.test(page.url());
-        clearStep('NAV', navOk && onCart ? 'OK' : 'FAIL', `${A} url=${safeLoc(page.url()).slice(0, 50)}`);
-        if (!(navOk && onCart)) failedSubstep = failedSubstep === 'none' ? 'NAV' : failedSubstep;
         await dismissInterstitials(page);
+        const landedUrl = safeLoc(page.url());
+        const cartAppUp = await isVisibleSafe(page.locator('[class*="cart" i], [data-testid*="cart" i]').first());
+        await crumb('NAV', navOk && cartAppUp ? 'OK' : 'FAIL', `${tag} url=${landedUrl} goto=${navOk ? 'y' : 'n'} cartApp=${cartAppUp ? 'y' : 'n'}`);
 
-        // ── 2) COOKIE-BANNER — the /cart cookie consent sits at the bottom and can intercept the ⋮ click or
-        //    overlay the confirm dialog. Log whether it was there, then dismiss it (scoped — never a modal).
-        const bannerPresent = await isVisibleSafe(
-          page.locator('[class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i]'),
-        );
-        await dismissCookieBanner(page);
-        clearStep('COOKIE-BANNER', 'OK', `${A} present=${bannerPresent ? 'y-dismissed' : 'n'}`);
-
-        // ── 3) INITIAL-COUNT — cart badge/count at start (the N we must clear). Server truth via cartResidual.
+        // ── SUB-STEP 3 (read early): INITIAL-COUNT — the N to clear (server-truth badge). Already-empty short-circuits.
         const before = await cartResidual(page);
         if (attempt === 0) initialCount = before;
-        clearStep('INITIAL-COUNT', before >= 0 ? 'OK' : 'FAIL', `${A} cart=${before}`);
+        await crumb('INITIAL-COUNT', before < 0 ? 'FAIL' : 'OK', `${tag} cart=${before}`);
         if (before === 0) {
-          remaining = 0;
-          clearStep('ALREADY-EMPTY', 'OK', A);
-          emitSummary('EMPTY');
-          return; // no-op success
+          failedAt = 'none';
+          await crumb('SUMMARY', 'OK', `${tag} already-empty initial=${initialCount} final=0`);
+          return;
         }
+
+        // ── SUB-STEP 2: COOKIE-BANNER — present? dismissed? (can intercept the ⋮ click / overlay the dialog) ──
+        failedAt = 'COOKIE-BANNER';
+        const cookie = await dismissCookieBanner(page);
+        await crumb('COOKIE-BANNER', 'OK', `${tag} state=${cookie}`);
 
         // The "Empty My Cart" dropdown item — the SUCCESS PROBE for "the menu opened" AND the click target.
         // Trace 935321: when the menu is CLOSED this renders 0x, so its visibility is the reliable menu-open
@@ -1458,26 +1442,22 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           .filter({ visible: true })
           .first();
 
-        // ── 4) MEATBALL-FOUND — is the ⋮ trigger located + visible? Log which selector/aria matched.
-        phase = 'menu';
+        // ── SUB-STEP 4: MEATBALL-FOUND — is the ⋮ "cart actions" button located + visible? ────────────────
+        failedAt = 'MEATBALL-FOUND';
         const meatball = page
           .getByRole('button', { name: /more options|more actions|cart actions|cart options|^more$|^options$|^actions$|^menu$/i })
           .or(page.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').filter({ visible: true }))
           .or(page.getByRole('button', { name: /⋮|kebab|ellipsis/i }))
           .filter({ visible: true })
           .first();
-        const meatballVisible = await meatball.isVisible({ timeout: 4000 }).catch(() => false);
-        const meatballAria = meatballVisible ? (await meatball.getAttribute('aria-label').catch(() => null)) : null;
-        clearStep(
-          'MEATBALL-FOUND',
-          meatballVisible ? 'OK' : 'FAIL',
-          `${A} aria=${(meatballAria || '-').replace(/\s+/g, ' ').slice(0, 30)}`,
-        );
-        if (!meatballVisible) failedSubstep = failedSubstep === 'none' ? 'MEATBALL-FOUND' : failedSubstep;
+        const meatballCount = await countSafe(meatball);
+        const meatballVisible = await isVisibleSafe(meatball);
+        await crumb('MEATBALL-FOUND', meatballVisible ? 'OK' : 'FAIL', `${tag} vis=${meatballVisible ? 'y' : 'n'} count=${meatballCount}`);
 
-        // ── 5) MENU-OPEN — click ⋮ ROBUSTLY, then VERIFY the dropdown opened ("Empty My Cart" visible). The
-        //    robustClickToOpen ladder treats the menuitem becoming visible as the open signal (belt-and-
-        //    suspenders since the /cart URL fix; its first plain-click rung already opens it). Log DEFINITIVELY.
+        // ── SUB-STEP 5: MEATBALL-CLICKED / MENU-OPEN — open the ⋮ menu ROBUSTLY, then VERIFY it opened. The old
+        //    code did a single plain click then BLINDLY clicked "Empty My Cart"; robustClickToOpen tries the
+        //    click-strategy ladder, treating "Empty My Cart" becoming visible as the open signal, up to 3 tries.
+        failedAt = 'MENU-OPEN';
         let openedVia: string | null = null;
         for (let openTry = 0; openTry < 3 && openedVia === null; openTry++) {
           if (!(await meatball.isVisible({ timeout: 4000 }).catch(() => false))) {
@@ -1488,112 +1468,101 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           openedVia = await robustClickToOpen(page, meatball, emptyItem, 1800);
         }
         const menuOpen = openedVia !== null && (await isVisibleSafe(emptyItem));
-        clearStep('MENU-OPEN', menuOpen ? 'OK' : 'FAIL', `${A} via=${openedVia ?? 'NONE'}`);
-        if (!menuOpen) failedSubstep = failedSubstep === 'none' ? 'MENU-OPEN' : failedSubstep;
+        await crumb('MENU-OPEN', menuOpen ? 'OK' : 'FAIL', `${tag} menuOpen=${menuOpen ? 'y' : 'n'} via=${openedVia ?? 'NONE'}`);
 
         if (menuOpen) {
-          // ── 6) EMPTY-CLICKED — click "Empty My Cart" (now confirmed present). Log success/fail.
-          phase = 'empty';
-          let emptyClicked = 'OK';
-          try {
-            await emptyItem.click({ timeout: 4000 });
-          } catch (e) {
-            emptyClicked = 'FAIL';
-          }
-          clearStep('EMPTY-CLICKED', emptyClicked, A);
-          if (emptyClicked === 'FAIL') failedSubstep = failedSubstep === 'none' ? 'EMPTY-CLICKED' : failedSubstep;
-          // ★ DELIBERATELY NO broad dismissInterstitials() here. It clicks ANY visible close/dismiss/continue
-          //   button and would CLOSE the "Delete Items" confirm dialog we are about to confirm (a plausible
-          //   cause of the "menu opens but cart stays 5" symptom — the confirm dialog was auto-dismissed
-          //   before we clicked "Yes, delete items"). The only overlay that legitimately needs clearing here
-          //   is the cookie banner, handled by the SCOPED dismissCookieBanner below.
+          // ── SUB-STEP 6: EMPTY-CLICKED — click "Empty My Cart" (the trash-icon dropdown item). ───────────
+          failedAt = 'EMPTY-CLICKED';
+          const emptyClicked = await emptyItem.click({ timeout: 4000 }).then(() => true).catch(() => false);
+          // ★ DELIBERATELY NO broad dismissInterstitials() here (#91). It clicks ANY visible close/dismiss/
+          //   continue button and can CLOSE the "Delete Items" confirm dialog before we click "Yes, delete
+          //   items" — a prime suspect for "menu opens but cart stays 5" (the confirm auto-dismissed). The
+          //   only overlay that legitimately needs clearing between the empty-click and the confirm is the
+          //   cookie banner, handled by the SCOPED dismissCookieBanner in SUB-STEP 7 below.
+          await crumb('EMPTY-CLICKED', emptyClicked ? 'OK' : 'FAIL', `${tag} clicked=${emptyClicked ? 'y' : 'n'}`);
 
-          // ── 7) DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Primary button is EXACTLY
-          //    "Yes, delete items" (red); secondary "Cancel". Its visibility IS the dialog-appeared signal.
-          phase = 'confirm';
+          // ── SUB-STEP 7: DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Live screenshots:
+          //    title "Delete Items", PRIMARY button EXACTLY "Yes, delete items" (red), secondary "Cancel".
+          failedAt = 'DIALOG-APPEARED';
           const dialog = page.locator('[role="dialog"], [role="alertdialog"]').filter({ visible: true }).last();
           const confirmBtn = dialog
             .getByRole('button', { name: /yes,?\s*delete items/i })
             .or(page.getByRole('button', { name: /yes,?\s*delete items/i }))
             .filter({ visible: true })
             .first();
-          const dialogShown = await confirmBtn
+          const confirmShown = await confirmBtn
             .waitFor({ state: 'visible', timeout: 6000 })
             .then(() => true)
             .catch(() => false);
-          clearStep('DIALOG-APPEARED', dialogShown ? 'OK' : 'FAIL', A);
-          if (!dialogShown) failedSubstep = failedSubstep === 'none' ? 'DIALOG-APPEARED' : failedSubstep;
-
+          const dialogVisible = await isVisibleSafe(dialog);
           // Cookie banner can overlay the modal: dismiss COOKIES ONLY (scoped — never the confirm modal).
           await dismissCookieBanner(page);
-          // If the confirm button vanished after the (scoped, safe) cookie dismiss, some overlay-dismissal
-          // closed the dialog — surface it explicitly (rules dismiss-closes-dialog in or out for good).
-          const dialogSurvived = dialogShown ? await isVisibleSafe(confirmBtn) : false;
-          if (dialogShown && !dialogSurvived) {
-            clearStep('DIALOG-VANISHED', 'FAIL', `${A} confirm-btn-gone-after-cookie-dismiss`);
-            failedSubstep = failedSubstep === 'none' ? 'DIALOG-VANISHED' : failedSubstep;
+          await crumb('DIALOG-APPEARED', confirmShown ? 'OK' : 'FAIL', `${tag} dialog=${dialogVisible ? 'y' : 'n'} confirmBtn=${confirmShown ? 'y' : 'n'}`);
+
+          // ★ DIALOG-VANISHED probe (#91): the confirm button rendered but is GONE after the (scoped,
+          //   cookie-only) dismiss above — some overlay-dismissal closed the dialog before we could confirm.
+          //   Surfaced explicitly so one fire rules dismiss-closes-dialog in or out for good.
+          const dialogSurvived = confirmShown ? await isVisibleSafe(confirmBtn) : false;
+          if (confirmShown && !dialogSurvived) {
+            failedAt = 'DIALOG-VANISHED';
+            await crumb('DIALOG-VANISHED', 'FAIL', `${tag} confirm-btn-gone-after-cookie-dismiss`);
           }
 
-          // ── 8/9) CONFIRM-CLICKED + DELETE-FIRED — arm the clear-write wait BEFORE clicking (so a fast
-          //    response is not missed), click the EXACT "Yes, delete items" primary, then report whether a
-          //    server clear-write actually fired (method:status). This is the pivotal disambiguation:
-          //    confirm clicked + DELETE-FIRED=FAIL ⇒ the click didn't reach the server; DELETE-FIRED=OK but
-          //    FINAL-COUNT non-zero ⇒ the server accepted it but didn't persist (a different class of bug).
           if (dialogSurvived) {
-            const delPromise = page
-              .waitForResponse((r) => {
-                try {
-                  return isClearWrite(r.request().method(), r.url(), r.status());
-                } catch {
-                  return false;
-                }
-              }, { timeout: 6000 })
+            // ── SUB-STEP 8: CONFIRM-CLICKED — click "Yes, delete items". ─────────────────────────────────
+            failedAt = 'CONFIRM-CLICKED';
+            const writesBeforeConfirm = clearWrites.length;
+            // ★ Arm the clear-write wait BEFORE the confirm click (#91) so a fast server response can't land
+            //   between the click and a later waitForResponse arm. (The always-on onClearResp listener still
+            //   records every write; this promise is only the bounded wait for one to arrive.)
+            const delRespPromise = page
+              .waitForResponse((r) => isCartClearWrite(r.request().method(), r.url(), r.status()), { timeout: 6000 })
               .catch(() => null);
-            let confirmClicked = 'OK';
-            try {
-              await confirmBtn.click({ timeout: 4000 });
-            } catch (e) {
-              confirmClicked = 'FAIL';
-            }
-            clearStep('CONFIRM-CLICKED', confirmClicked, A);
-            if (confirmClicked === 'FAIL') failedSubstep = failedSubstep === 'none' ? 'CONFIRM-CLICKED' : failedSubstep;
+            const confirmClicked = await confirmBtn.click({ timeout: 4000 }).then(() => true).catch(() => false);
             await dismissInterstitials(page); // safe now — the confirm has been clicked / dialog actioned
+            await crumb('CONFIRM-CLICKED', confirmClicked ? 'OK' : 'FAIL', `${tag} clicked=${confirmClicked ? 'y' : 'n'}`);
 
-            const delResp = await delPromise;
-            const delDetail = delResp
-              ? `${delResp.request().method()}:${delResp.status()} ${safeLoc(delResp.url()).slice(0, 40)}`
-              : 'none';
-            clearStep('DELETE-FIRED', delResp ? 'OK' : 'FAIL', `${A} ${delDetail}`);
-            if (!delResp && confirmClicked === 'OK') failedSubstep = failedSubstep === 'none' ? 'DELETE-FIRED' : failedSubstep;
+            // ── SUB-STEP 9: DELETE-FIRED — did a cart-clear/delete NETWORK write fire after the confirm? ──
+            //    The wait was armed before the click; read what the listener saw once it settles.
+            failedAt = 'DELETE-FIRED';
+            await delRespPromise;
+            const fired = clearWrites.slice(writesBeforeConfirm);
+            const lastWrite = fired[fired.length - 1];
+            await crumb(
+              'DELETE-FIRED',
+              fired.length ? 'OK' : 'FAIL',
+              `${tag} writes=${fired.length}${lastWrite ? ` last=${lastWrite.method}:${lastWrite.status}:${lastWrite.path}` : ''}`,
+            );
           }
         }
 
-        // ── 10) FINAL-COUNT / VERIFY — FRESH nav + cart BADGE (server truth), not optimistic DOM. If the menu
-        //    never opened / confirm never fired, remaining stays non-zero → the loop RETRIES; if still non-empty
-        //    after the retry, the fail-loud STEP-FAIL below fires with the residual count + the breadcrumb.
-        phase = 'verify';
+        // ── SUB-STEP 10: FINAL-COUNT / VERIFY — FRESH nav + cart BADGE (server truth), not optimistic DOM. ──
+        failedAt = 'FINAL-COUNT';
         await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
         remaining = await cartResidual(page);
-        clearStep('FINAL-COUNT', remaining === 0 ? 'OK' : 'FAIL', `${A} before=${before} remaining=${remaining}`);
+        await crumb('FINAL-COUNT', remaining === 0 ? 'OK' : 'FAIL', `${tag} before=${before} remaining=${remaining}`);
         if (remaining === 0) {
-          failedSubstep = 'none'; // durably empty — the clear succeeded regardless of any transient sub-step flag
-          emitSummary('EMPTY');
-          return;
+          failedAt = 'none';
+          await crumb('SUMMARY', 'OK', `${tag} initial=${initialCount} final=0`);
+          return; // durably empty
         }
       }
-
-      // Still non-empty (or unknown) after the retry → loud STEP-FAIL with the residual count + breadcrumb.
-      // If nothing earlier flagged but a delete fired and the count held, the break is server-persistence.
-      if (failedSubstep === 'none' && remaining !== 0) failedSubstep = clearWrites.length ? 'SERVER-PERSIST' : 'UNKNOWN';
-      const summary = emitSummary('NOT-EMPTY');
+      // Still non-empty (or unknown) after the retry → loud STEP-FAIL. The CLEAR-SUMMARY names the exact
+      // failing sub-step; the breadcrumb (every CLEAR-STEP line) is folded into the thrown error_message so
+      // the persisted failure trace pinpoints WHERE the clear broke (nav / cookie / meatball / menu-open /
+      // empty-click / dialog / confirm / delete-fired / final-count) with initial=N final=M — no more guessing.
+      // ★ SERVER-PERSIST classification (#91): every client sub-step succeeded AND a clear-write fired, yet
+      //   the count held — the server accepted the delete but didn't persist it (a different bug class than
+      //   any client-side break; route the fix at the API, not the UI flow).
+      if (failedAt === 'FINAL-COUNT' && clearWrites.length > 0) failedAt = 'SERVER-PERSIST';
+      const summary = await clearStep(page, label, 'SUMMARY', 'FAIL', `failedAt=${failedAt} initial=${initialCount} final=${remaining} attempts=${MAX_ATTEMPTS}`);
       const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
       console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
       if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
       throw new Error(
-        `${summary} :: ${d.compact} :: ${label}: cart NOT empty (residual=${remaining}) after ${MAX_ATTEMPTS} ` +
-          `"Empty My Cart" attempts — FAILING SUB-STEP=${failedSubstep}. The CLEAR-STEP breadcrumb above pinpoints ` +
-          `where it broke (nav / cookie / count / meatball / menu-open / empty-click / dialog / confirm / delete-fired / final-count).`,
+        `${d.compact} :: ${summary} :: BREADCRUMB=[ ${crumbs.join(' | ')} ] :: ${label}: cart NOT empty ` +
+          `(residual=${remaining}) after ${MAX_ATTEMPTS} "Empty My Cart" attempts — failing sub-step: ${failedAt}.`,
       );
     } finally {
       page.off('response', onClearResp);
