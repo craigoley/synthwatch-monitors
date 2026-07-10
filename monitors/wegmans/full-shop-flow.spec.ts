@@ -63,6 +63,16 @@ const BYPASS_HEADER = 'x-vercel-protection-bypass';
  *  runner change) or this spec cap has no effect. */
 const RUN_CAP_MS = 600_000;
 const STEP_TIMEOUT = 20_000;
+// ★ POST-LOGIN READINESS BUDGET (trace 935622: token event fired + redirect completed + "Hello, <name>"
+//   present 3x in the OTHER-DIAG snapshot ⇒ login MATERIALLY SUCCEEDED, yet the login STEP red because the
+//   greeting had not rendered within STEP_TIMEOUT=20s). The consumer post-login redirect (B2C → id_token →
+//   www.wegmans.com header re-hydrate) can take far longer than 20s headless from datacenter egress (Craig:
+//   "the page needs ~a minute to fully load after login"). The token-acquisition event (45s wait above) is
+//   the auth-completion proof; THIS is only how long we allow the signed-in HEADER to paint afterward. It
+//   does NOT weaken the success check (#79): we still REQUIRE the real "Hello," greeting — we just stop
+//   asserting before a slow-but-successful login has had time to render it. Bounded well under the runner's
+//   MAX_FLOW_MS=180s whole-flow cap. */
+const LOGIN_READY_MS = 60_000;
 // ★ SPEC-OWNED per-action / per-navigation ceilings. The runner applies check.timeout_ms as the page
 //   DEFAULT (runner/index.ts page.setDefaultTimeout) — a PER-ACTION bound, NOT a whole-flow one. A mis-set
 //   check.timeout_ms (the 30000000ms=500min incident) made every UNBOUNDED action inherit a 500-min
@@ -768,7 +778,9 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         .or(page.getByText(/hello,/i))
         .filter({ visible: true })
         .first();
-      const helloSeen = await appearsWithin(helloGreeting, STEP_TIMEOUT);
+      // Wait up to LOGIN_READY_MS (not STEP_TIMEOUT) for the greeting to PAINT: the token event above already
+      // proved auth completed; a slow post-login redirect/hydrate must not red a login that succeeded (935622).
+      const helloSeen = await appearsWithin(helloGreeting, LOGIN_READY_MS);
       // LOGIN-STATE telemetry: WHY a login outcome happened. signin=present + hello=absent ⇒ login did NOT
       // complete (page stuck at Sign in). Structural booleans only — never the account name/value.
       const signInStill = await isVisibleSafe(
@@ -777,7 +789,7 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       console.log(`[full-shop-flow] LOGIN-STATE signin=${signInStill ? 'present' : 'absent'} hello=${helloSeen ? 'present' : 'absent'}`);
       expect(
         helloSeen,
-        `login: the logged-in header greeting ("Hello, <name>") did NOT appear within ${Math.round(STEP_TIMEOUT / 1000)}s ` +
+        `login: the logged-in header greeting ("Hello, <name>") did NOT appear within ${Math.round(LOGIN_READY_MS / 1000)}s ` +
           `(LOGIN-STATE signin=${signInStill ? 'present' : 'absent'} hello=absent) — login did NOT complete. Reds HERE at ` +
           `the login step (li0), not silently shopping unauthenticated. (Bug A: the B2C submit likely did not finish — ` +
           `the consumer B2C flow is multi-step email→Next→password→Sign in; debug the submit from here.)`,
