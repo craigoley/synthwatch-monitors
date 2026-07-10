@@ -1074,6 +1074,16 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       await expect(lineItems.first(), 'verify-cart-4: no cart line items rendered (NET-NEW selector — verify from diag)').toBeVisible({ timeout: STEP_TIMEOUT });
       const n = await countSafe(lineItems);
       expect(n, `verify-cart-4: expected ≥4 cart line items, saw ${n} (some adds may have failed — read per-step diags)`).toBeGreaterThanOrEqual(4);
+      // ★ INVARIANT (Craig): the cart MUST be ≤ 4 here. >4 means baseline-clear-cart did NOT empty the
+      // previous session's leftover items (they accumulated) — the exact failure this PR fixes. Prefer the
+      // header BADGE (server truth) over the DOM line-item count (which can over-count sticky/duplicate rows);
+      // fall back to n only when the badge is absent. Fail LOUD rather than pass a cart polluted with residue.
+      const cartBadge = await readCartCount(page);
+      const cartCount = cartBadge ?? n;
+      expect(
+        cartCount,
+        `verify-cart-4: cart has ${cartCount} item(s) (>4) — baseline clear-cart did not empty leftover items; clearing failed`,
+      ).toBeLessThanOrEqual(4);
     });
 
     // ---- STEP: checkout as PICKUP (NET-NEW) --------------------------------------------------------
@@ -1171,49 +1181,117 @@ async function selectBananaResult(page: Page): Promise<Loc> {
   );
 }
 
-/** Teardown — clear every cart line item (NET-NEW / UNVERIFIED). Best-effort loop with a cap so it can
- *  never hang; tries per-item Remove, then a bulk "clear/empty cart" affordance. Verify from first-fire
- *  diag: a scheduled monitor MUST end with an empty cart. */
+/** Best-effort residual cart count for clearCart's empty-verify. Prefers the header cart BADGE (server
+ *  truth via readCartCount); if there's no numeric badge, treats a rendered empty-cart state ("your cart is
+ *  empty" / "start shopping") as 0, else falls back to the count of VISIBLE cart line items. Returns -1 when
+ *  the state is genuinely UNKNOWN (no badge, no empty-state, no line items) — the caller MUST NOT treat -1
+ *  as empty. This is the fix for the old false-pass: a missing/unnumbered badge used to read as 0 and let a
+ *  broken clear look successful. */
+async function cartResidual(page: Page): Promise<number> {
+  const badge = await readCartCount(page); // header badge = server truth (or null when absent/unnumbered)
+  if (badge !== null) return badge;
+  const emptyState = await page
+    .getByText(/your cart is empty|cart is empty|no items in your cart|start shopping|cart is currently empty/i)
+    .filter({ visible: true })
+    .first()
+    .isVisible({ timeout: 1000 })
+    .catch(() => false);
+  if (emptyState) return 0;
+  const lineItems = await countSafe(
+    page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true }),
+  );
+  if (lineItems > 0) return lineItems; // definitely non-empty
+  return -1; // UNKNOWN — no positive empty signal; never reported as empty
+}
+
+/** Teardown / baseline — clear the cart via the cart page's NATIVE "Empty My Cart" BULK action (⋮ menu),
+ *  NOT a per-item Remove loop. Recon (trace 934649 + Craig's cart-page screenshot): the prior per-item
+ *  remove loop fired ZERO removal requests — its /^remove$/ button selector never matched the real cart's
+ *  remove control, so nothing cleared and the previous session's items PERSISTED and accumulated (cart hit 5
+ *  → verify-cart-4 failed). The /shop/cart page has a MEATBALL menu (⋮, top-right of "My Cart") that opens a
+ *  dropdown (Print / Share / Add to Saved Lists / Empty My Cart); "Empty My Cart" (trash icon) is a SINGLE
+ *  bulk clear — one action, exactly how a user empties the cart. Flow: open ⋮ → click "Empty My Cart" →
+ *  confirm → VERIFY the cart is DURABLY 0 (server truth via readCartCount / cartResidual). One retry, then a
+ *  loud STEP-FAIL with the residual count — NEVER a silent pass. Selectors here are NET-NEW (the ⋮ trigger,
+ *  the menuitem, the confirm) — verify/tune them from the first-fire diag. */
 async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<void> {
   await step(label, async () => {
-    // ★ DURABLE, VERIFIED clear (trace 933812: badge went 0,0,…,3,3 — the old per-item removes cleared the
-    // DOM optimistically but didn't PERSIST server-side, and the assert-empty read DOM cart-item elements,
-    // not the cart BADGE — so it passed while the cart still had 3). Now: up to MAX_PASSES passes; each pass
-    // removes items one-at-a-time (re-querying, since removal re-indexes the list), then RE-NAVIGATES fresh
-    // and reads the cart BADGE (server truth, via readCartCount) — an optimistic DOM removal that didn't
-    // persist is caught by the fresh-nav badge and re-cleared next pass. Empty (badge 0) → return; still
-    // non-empty after MAX_PASSES → STEP-FAIL with the residual count (loud, not silent).
-    const MAX_PASSES = 3;
-    let remaining = -1;
-    for (let pass = 0; pass < MAX_PASSES; pass++) {
-      await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
-      await dismissInterstitials(page);
-      // Remove the first visible item until none remain (re-query each iteration — removal re-indexes).
-      for (let i = 0; i < 30; i++) {
-        const remove = page.getByRole('button', { name: /^remove$|remove item|delete item/i }).filter({ visible: true }).first();
-        if (!(await remove.isVisible({ timeout: 1500 }).catch(() => false))) break;
-        await remove.click({ timeout: 4000 }).catch(() => {});
+    // A native window.confirm (if Wegmans uses one instead of an in-page modal) would BLOCK the run — accept
+    // it. An in-page role=dialog is handled by clicking its confirm button below. Registered once; removed in
+    // finally so we don't stack handlers or leak across the retry.
+    page.on('dialog', (d) => {
+      void d.accept().catch(() => {});
+    });
+    try {
+      const MAX_ATTEMPTS = 2; // first attempt + one retry
+      let remaining = -1;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
-      }
-      const bulkClear = page.getByRole('button', { name: /clear cart|empty cart|remove all/i }).filter({ visible: true }).first();
-      if (await bulkClear.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await bulkClear.click({ timeout: 4000 }).catch(() => {});
+
+        // Already empty (badge 0 / empty-state) → no-op success. cartResidual never reports -1 as empty.
+        const before = await cartResidual(page);
+        if (before === 0) {
+          console.log(`[full-shop-flow] CLEAR-CART ${label} attempt=${attempt + 1} already-empty=y`);
+          return;
+        }
+
+        // 1) Open the MEATBALL (⋮) menu at the top-right of "My Cart". It's an icon button — try its likely
+        //    aria-labels, then any aria-haspopup trigger, then an ellipsis glyph. First visible wins.
+        const meatball = page
+          .getByRole('button', { name: /more options|more actions|cart actions|cart options|^more$|^options$|^actions$|^menu$/i })
+          .or(page.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').filter({ visible: true }))
+          .or(page.getByRole('button', { name: /⋮|kebab|ellipsis/i }))
+          .filter({ visible: true })
+          .first();
+        if (await meatball.isVisible({ timeout: 4000 }).catch(() => false)) {
+          await meatball.click({ timeout: 4000 }).catch(() => {});
+          await dismissInterstitials(page);
+        }
+
+        // 2) Click "Empty My Cart" (the trash-icon dropdown item) — role menuitem/button/link, or text.
+        const emptyItem = page
+          .getByRole('menuitem', { name: /empty (my )?cart/i })
+          .or(page.getByRole('button', { name: /empty (my )?cart/i }))
+          .or(page.getByRole('link', { name: /empty (my )?cart/i }))
+          .or(page.getByText(/empty my cart/i))
+          .filter({ visible: true })
+          .first();
+        if (await emptyItem.isVisible({ timeout: 4000 }).catch(() => false)) {
+          await emptyItem.click({ timeout: 4000 }).catch(() => {});
+          await dismissInterstitials(page);
+        }
+
+        // 3) Confirm dialog (Wegmans likely confirms before emptying) — a role=dialog "Empty"/"Confirm"/"Yes".
+        //    A native confirm is already auto-accepted by the page.on('dialog') handler above.
+        const confirm = page
+          .getByRole('dialog')
+          .getByRole('button', { name: /^empty( my cart)?$|^confirm$|^yes.*$|^ok$|remove all|empty cart/i })
+          .or(page.getByRole('button', { name: /^empty my cart$|^yes,? empty|confirm empty/i }))
+          .filter({ visible: true })
+          .first();
+        if (await confirm.isVisible({ timeout: 2500 }).catch(() => false)) {
+          await confirm.click({ timeout: 4000 }).catch(() => {});
+          await dismissInterstitials(page);
+        }
+
+        // 4) VERIFY DURABLY EMPTY — FRESH nav + cart BADGE (server truth), not optimistic DOM.
+        await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
+        remaining = await cartResidual(page);
+        console.log(`[full-shop-flow] CLEAR-CART ${label} attempt=${attempt + 1} before=${before} remaining=${remaining}`);
+        if (remaining === 0) return; // durably empty
       }
-      // ★ VERIFY DURABLY EMPTY via a FRESH nav + the cart BADGE (server state, not optimistic DOM).
-      await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
-      await dismissInterstitials(page);
-      const badge = await readCartCount(page);
-      const domItems = await countSafe(page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true }));
-      remaining = badge ?? domItems; // prefer the badge (server truth); fall back to the DOM count
-      console.log(`[full-shop-flow] CLEAR-CART ${label} pass=${pass + 1} badge=${badge ?? '?'} domItems=${domItems} remaining=${remaining}`);
-      if (remaining <= 0) return; // durably empty
+      // Still non-empty (or unknown) after the retry → loud STEP-FAIL with the residual count.
+      const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
+      console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
+      if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
+      throw new Error(
+        `${d.compact} :: ${label}: cart NOT empty (residual=${remaining}) after ${MAX_ATTEMPTS} "Empty My Cart" attempts — the ⋮ menu / "Empty My Cart" item / confirm did not clear the cart (verify the NET-NEW selectors from the diag).`,
+      );
+    } finally {
+      page.removeAllListeners('dialog');
     }
-    // Still not empty after MAX_PASSES → loud STEP-FAIL with the residual count.
-    const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
-    console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
-    if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
-    throw new Error(`${d.compact} :: ${label}: ${remaining} item(s) remain after ${MAX_PASSES} clear passes — cart not DURABLY empty (removes not persisting server-side).`);
   });
 }
 
