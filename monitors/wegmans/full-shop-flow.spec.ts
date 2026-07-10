@@ -1204,16 +1204,116 @@ async function cartResidual(page: Page): Promise<number> {
   return -1; // UNKNOWN — no positive empty signal; never reported as empty
 }
 
+/** Best-effort dismiss the /shop/cart cookie-consent banner ("Our website uses cookies… [Close]") that sits
+ *  at the BOTTOM of the cart page and can intercept the ⋮ meatball click OR overlay the "Delete Items"
+ *  confirm dialog. SCOPED to a cookie/consent container so it can NEVER dismiss the confirm modal itself
+ *  (a generic page-wide "close" could). Prefers "Close" (the banner's actual control), then accept/got-it.
+ *  Bounded, optional (no-op if absent), never throws. */
+async function dismissCookieBanner(page: Page): Promise<void> {
+  const banner = page
+    .locator('[class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i], [aria-label*="cookie" i]')
+    .filter({ visible: true })
+    .first();
+  if (!(await banner.isVisible({ timeout: 800 }).catch(() => false))) return;
+  const btn = banner
+    .getByRole('button', { name: /close|accept( all)?( cookies)?|got it|^ok$|i (agree|accept)|dismiss/i })
+    .or(banner.getByRole('link', { name: /close|accept|got it|dismiss/i }))
+    .filter({ visible: true })
+    .first();
+  await btn.click({ timeout: 1500 }).catch(() => {});
+}
+
+/** ★ ROBUST-CLICK LADDER for a React control that ACCEPTS a click but whose onClick does not fire on a plain
+ *  locator.click() — the SAME click-strategy ladder addToCartLadder uses (hydrate+locator → precise-center →
+ *  raw-pointer → dispatch-events → force), generalized to any trigger + caller-supplied success probe.
+ *  Clicks `trigger`, then after each strategy gives `opened` an ARMED visibility wait (≤armMs, no hard sleep);
+ *  STOPS and returns the strategy name the instant `opened` becomes visible, or null if none opened it. This
+ *  is what OPENS the cart's ⋮ meatball menu: trace 935321 shows the menu items (Print/Share/Empty My Cart)
+ *  render 0x — the dropdown never opened for the runner's plain click, so "Empty My Cart" was never clickable
+ *  (identical click-lands-but-handler-doesn't-fire bug as add-to-cart). Structural/booleans only; never
+ *  throws (a strategy that throws — not actionable / no bbox — just falls through to the next). */
+async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 1800): Promise<string | null> {
+  const RUNG_CLICK_TIMEOUT = 2200;
+  const t = trigger.first();
+  const strategies: Array<{ name: string; run: () => Promise<void> }> = [
+    {
+      name: 'hydrate+locator',
+      run: async () => {
+        await page.waitForLoadState('networkidle', { timeout: 1500 }).catch(() => {});
+        await t.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+        await t.click({ timeout: RUNG_CLICK_TIMEOUT });
+      },
+    },
+    {
+      name: 'precise-center',
+      run: async () => {
+        const box = await t.boundingBox();
+        if (!box) throw new Error('precise-center: no bounding box');
+        await t.click({ position: { x: box.width / 2, y: box.height / 2 }, timeout: RUNG_CLICK_TIMEOUT });
+      },
+    },
+    {
+      name: 'raw-pointer',
+      run: async () => {
+        const box = await t.boundingBox();
+        if (!box) throw new Error('raw-pointer: no bounding box');
+        await t.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.up();
+      },
+    },
+    {
+      name: 'dispatch-events',
+      run: async () => {
+        await t.evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          const opts: any = { bubbles: true, cancelable: true, composed: true, button: 0, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+          (el as HTMLElement).click();
+        });
+      },
+    },
+    {
+      name: 'force',
+      run: async () => {
+        await t.click({ force: true, timeout: RUNG_CLICK_TIMEOUT });
+      },
+    },
+  ];
+  for (const s of strategies) {
+    try {
+      await s.run();
+    } catch {
+      /* strategy threw (not actionable / no bbox) — fall through to the next rung */
+    }
+    if (await appearsWithin(opened, armMs)) return s.name;
+  }
+  return null;
+}
+
 /** Teardown / baseline — clear the cart via the cart page's NATIVE "Empty My Cart" BULK action (⋮ menu),
  *  NOT a per-item Remove loop. Recon (trace 934649 + Craig's cart-page screenshot): the prior per-item
  *  remove loop fired ZERO removal requests — its /^remove$/ button selector never matched the real cart's
  *  remove control, so nothing cleared and the previous session's items PERSISTED and accumulated (cart hit 5
  *  → verify-cart-4 failed). The /shop/cart page has a MEATBALL menu (⋮, top-right of "My Cart") that opens a
  *  dropdown (Print / Share / Add to Saved Lists / Empty My Cart); "Empty My Cart" (trash icon) is a SINGLE
- *  bulk clear — one action, exactly how a user empties the cart. Flow: open ⋮ → click "Empty My Cart" →
- *  confirm → VERIFY the cart is DURABLY 0 (server truth via readCartCount / cartResidual). One retry, then a
- *  loud STEP-FAIL with the residual count — NEVER a silent pass. Selectors here are NET-NEW (the ⋮ trigger,
- *  the menuitem, the confirm) — verify/tune them from the first-fire diag. */
+ *  bulk clear — one action, exactly how a user empties the cart. Flow: dismiss cookie banner → open ⋮
+ *  ROBUSTLY → VERIFY the menu opened ("Empty My Cart" visible) → click "Empty My Cart" → confirm "Yes,
+ *  delete items" → VERIFY the cart is DURABLY 0 (server truth via readCartCount / cartResidual). One retry,
+ *  then a loud STEP-FAIL with the residual count — NEVER a silent pass.
+ *
+ *  ★ ROOT CAUSE (trace 935321): the ⋮ meatball menu NEVER OPENED for the runner. The old code did a single
+ *  plain meatball.click() that LANDS on the button but does NOT fire its React onClick → the dropdown items
+ *  (Print/Share/Empty My Cart) render 0x → "Empty My Cart" was never clickable, and the code blindly tried to
+ *  click a menuitem that wasn't there. Same click-lands-but-handler-doesn't-fire bug as add-to-cart. FIX:
+ *  robustClickToOpen (the add-to-cart click-strategy ladder, generalized) opens the menu, VERIFY it opened
+ *  before clicking, and the confirm targets the EXACT primary "Yes, delete items" (live screenshots: ⋮ →
+ *  "Empty My Cart" → "Delete Items" dialog → "Yes, delete items"), never a broad affirmative. */
 async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<void> {
   await step(label, async () => {
     // A native window.confirm (if Wegmans uses one instead of an in-page modal) would BLOCK the run — accept
@@ -1236,20 +1336,14 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           return;
         }
 
-        // 1) Open the MEATBALL (⋮) menu at the top-right of "My Cart". It's an icon button — try its likely
-        //    aria-labels, then any aria-haspopup trigger, then an ellipsis glyph. First visible wins.
-        const meatball = page
-          .getByRole('button', { name: /more options|more actions|cart actions|cart options|^more$|^options$|^actions$|^menu$/i })
-          .or(page.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').filter({ visible: true }))
-          .or(page.getByRole('button', { name: /⋮|kebab|ellipsis/i }))
-          .filter({ visible: true })
-          .first();
-        if (await meatball.isVisible({ timeout: 4000 }).catch(() => false)) {
-          await meatball.click({ timeout: 4000 }).catch(() => {});
-          await dismissInterstitials(page);
-        }
+        // 0) DISMISS THE COOKIE BANNER first — the cart page's cookie consent ("Our website uses cookies…
+        //    [Close]") sits at the BOTTOM and can intercept the ⋮ click or overlay the confirm dialog. Scoped
+        //    to a cookie container so it can never dismiss a real modal. No-op if absent.
+        await dismissCookieBanner(page);
 
-        // 2) Click "Empty My Cart" (the trash-icon dropdown item) — role menuitem/button/link, or text.
+        // The "Empty My Cart" dropdown item — the SUCCESS PROBE for "the menu opened" AND the click target.
+        // Trace 935321: when the menu is CLOSED this renders 0x, so its visibility is the reliable menu-open
+        // signal (the menu items only exist inside the OPEN dropdown).
         const emptyItem = page
           .getByRole('menuitem', { name: /empty (my )?cart/i })
           .or(page.getByRole('button', { name: /empty (my )?cart/i }))
@@ -1257,62 +1351,65 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           .or(page.getByText(/empty my cart/i))
           .filter({ visible: true })
           .first();
-        if (await emptyItem.isVisible({ timeout: 4000 }).catch(() => false)) {
+
+        // 1+2) OPEN THE ⋮ MENU ROBUSTLY, then VERIFY IT OPENED before touching the menuitem. The old code did
+        //    a single plain meatball.click() and then BLINDLY tried to click "Empty My Cart" — but the click
+        //    lands without firing React's onClick, so the dropdown never opened and the menuitem was never
+        //    there (trace 935321: menu items render 0x). Now: robustClickToOpen tries the add-to-cart
+        //    click-strategy ladder against the ⋮ button, treating "Empty My Cart" becoming visible as the
+        //    open signal, up to 3 escalating attempts. We only proceed once the menu is CONFIRMED open.
+        const meatball = page
+          .getByRole('button', { name: /more options|more actions|cart actions|cart options|^more$|^options$|^actions$|^menu$/i })
+          .or(page.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').filter({ visible: true }))
+          .or(page.getByRole('button', { name: /⋮|kebab|ellipsis/i }))
+          .filter({ visible: true })
+          .first();
+        let openedVia: string | null = null;
+        for (let openTry = 0; openTry < 3 && openedVia === null; openTry++) {
+          if (!(await meatball.isVisible({ timeout: 4000 }).catch(() => false))) {
+            await dismissInterstitials(page); // meatball not found this round — clear overlays, re-probe
+            await dismissCookieBanner(page);
+            continue;
+          }
+          openedVia = await robustClickToOpen(page, meatball, emptyItem, 1800);
+        }
+        const menuOpen = openedVia !== null && (await isVisibleSafe(emptyItem));
+        console.log(
+          `[full-shop-flow] CLEAR-CART ${label} attempt=${attempt + 1} menuOpen=${menuOpen ? 'y' : 'n'} via=${openedVia ?? 'NONE'}`,
+        );
+
+        if (menuOpen) {
+          // 3) CLICK "Empty My Cart" (the trash-icon dropdown item, now confirmed present).
           await emptyItem.click({ timeout: 4000 }).catch(() => {});
           await dismissInterstitials(page);
+
+          // 4) CONFIRM the "Delete Items" dialog. Live screenshots: title "Delete Items", body "Are you sure
+          //    you want to delete these items from your cart?", PRIMARY button EXACTLY "Yes, delete items"
+          //    (red), secondary "Cancel". Click the EXACT primary within the dialog — never a broad
+          //    affirmative (the old /empty|yes|ok/ matcher could grab the wrong control), never "Cancel". A
+          //    native window.confirm is already auto-accepted by the page.on('dialog') handler above.
+          const dialog = page.locator('[role="dialog"], [role="alertdialog"]').filter({ visible: true }).last();
+          const confirmBtn = dialog
+            .getByRole('button', { name: /yes,?\s*delete items/i })
+            .or(page.getByRole('button', { name: /yes,?\s*delete items/i }))
+            .filter({ visible: true })
+            .first();
+          const confirmShown = await confirmBtn
+            .waitFor({ state: 'visible', timeout: 6000 })
+            .then(() => true)
+            .catch(() => false);
+          // Cookie banner can overlay the modal: dismiss COOKIES ONLY (scoped — never the confirm modal).
+          await dismissCookieBanner(page);
+          console.log(`[full-shop-flow] CLEAR-CART ${label} confirm="Yes, delete items" shown=${confirmShown ? 'y' : 'n'}`);
+          if (confirmShown) {
+            await confirmBtn.click({ timeout: 4000 }).catch(() => {});
+            await dismissInterstitials(page);
+          }
         }
 
-        // 3) CONFIRM the empty. Clicking "Empty My Cart" opens a confirmation modal (trace 934905: confirm/yes/
-        //    dialog text present) that the OLD selector never clicked: it scoped the affirmative button INSIDE
-        //    getByRole('dialog'), but the real modal is role=alertdialog / a custom div, so a bare "Yes"/
-        //    "Confirm"/"OK" button matched NEITHER branch → the dialog sat open, no empty fired, cart stayed
-        //    non-empty (fail-loud correctly caught it). Fix: wait for ANY visible modal container, then click its
-        //    AFFIRMATIVE button — matched broadly (empty/yes/confirm/ok/remove all/delete/clear) but EXCLUDING
-        //    negatives (cancel/keep/no/close/go back/continue shopping) so we CONFIRM, never dismiss. A native
-        //    window.confirm is already auto-accepted by the page.on('dialog') handler above.
-        const AFFIRM = /^\s*(empty|yes|confirm|ok|remove all|delete|clear)\b|empty (my )?cart/i;
-        const NEGATE = /cancel|keep|go ?back|dismiss|^\s*no\b|^\s*close\b|continue shopping/i;
-        const modal = page
-          .locator('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="dialog" i]')
-          .filter({ visible: true })
-          .last();
-        // Prefer a button INSIDE the modal; fall back to a page-wide affirmative (some modals carry no
-        // role/class). Wait for the confirm affordance to actually render — not a 2.5s race.
-        const confirm = modal
-          .getByRole('button', { name: AFFIRM })
-          .or(page.getByRole('button', { name: AFFIRM }))
-          .filter({ visible: true });
-        await confirm.first().waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
-        // Cookie banner can overlay the modal (screenshot showed a cookie "Close"): dismiss COOKIES ONLY here
-        // (never a generic close — that could dismiss the confirm modal itself).
-        await page
-          .getByRole('button', { name: /accept( all)?( cookies)?/i })
-          .filter({ visible: true })
-          .first()
-          .click({ timeout: 1500 })
-          .catch(() => {});
-        // Read every affirmative candidate's label (non-mutating), log them for first-fire tuning, then click
-        // the first that is NOT a negative.
-        const cc = await confirm.count().catch(() => 0);
-        const cand: Array<{ k: number; nm: string }> = [];
-        for (let k = 0; k < Math.min(cc, 8); k++) {
-          const btn = confirm.nth(k);
-          const raw =
-            (await btn.getAttribute('aria-label').catch(() => null)) || (await btn.innerText().catch(() => '')) || '';
-          cand.push({ k, nm: raw.replace(/\s+/g, ' ').trim() });
-        }
-        const pick = cand.find((c) => c.nm && !NEGATE.test(c.nm));
-        console.log(
-          `[full-shop-flow] CLEAR-CART ${label} confirm candidates=[${cand
-            .map((c) => c.nm.slice(0, 40) || '∅')
-            .join(' | ')}] pick=${pick ? pick.nm.slice(0, 40) : 'NONE'}`,
-        );
-        if (pick) {
-          await confirm.nth(pick.k).click({ timeout: 4000 }).catch(() => {});
-          await dismissInterstitials(page);
-        }
-
-        // 4) VERIFY DURABLY EMPTY — FRESH nav + cart BADGE (server truth), not optimistic DOM.
+        // 5) VERIFY DURABLY EMPTY — FRESH nav + cart BADGE (server truth), not optimistic DOM. If the menu
+        //    never opened this attempt (menuOpen=n), remaining will be non-zero → the loop RETRIES; if still
+        //    non-empty after the retry, the fail-loud STEP-FAIL below fires with the residual count.
         await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
         remaining = await cartResidual(page);
