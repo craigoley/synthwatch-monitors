@@ -686,11 +686,34 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
             '(aborted/blocked/creds-rejected). Login REDs here instead of silently shopping unauthenticated.',
         );
       }
-      // AND the post-login DOM anchor (b2c requires BOTH — token event + affordance — for COMPLETED).
-      await expect(
-        loggedInAffordance(page).first(),
-        'login: token acquired but no logged-in account affordance rendered (partial/aborted login)',
-      ).toBeVisible({ timeout: STEP_TIMEOUT });
+      // ★ ROOT-CAUSE FIX (Bug B, trace 928339): the OLD confirmation armed on loggedInAffordance, whose RX
+      // (/account|profile|orders|my wegmans|rewards|…/) matches ALWAYS-PRESENT header/footer nav chrome that
+      // is visible even LOGGED OUT — so it false-GREENed (li1) on a page STILL showing "Sign in", and the
+      // flow shopped UNAUTHENTICATED (the root of the whole add-to-cart saga: no session → add no-ops).
+      // Craig's telltale of REAL success: the header greeting changes "Sign in" → "Hello, <name>". Arm on
+      // THAT — the greeting /hello,/i appearing — so login FAILS LOUDLY here (li0) when it doesn't complete,
+      // instead of silently passing. (Kept the token-event requirement above; this replaces the loose DOM
+      // anchor with the definitive one.)
+      const helloGreeting = page
+        .getByRole('link', { name: /hello,/i })
+        .or(page.getByRole('button', { name: /hello,/i }))
+        .or(page.getByText(/hello,/i))
+        .filter({ visible: true })
+        .first();
+      const helloSeen = await appearsWithin(helloGreeting, STEP_TIMEOUT);
+      // LOGIN-STATE telemetry: WHY a login outcome happened. signin=present + hello=absent ⇒ login did NOT
+      // complete (page stuck at Sign in). Structural booleans only — never the account name/value.
+      const signInStill = await isVisibleSafe(
+        page.getByRole('link', { name: /^\s*(sign ?in|log ?in)\s*$/i }).or(page.getByRole('button', { name: /^\s*(sign ?in|log ?in)\s*$/i })),
+      );
+      console.log(`[full-shop-flow] LOGIN-STATE signin=${signInStill ? 'present' : 'absent'} hello=${helloSeen ? 'present' : 'absent'}`);
+      expect(
+        helloSeen,
+        `login: the logged-in header greeting ("Hello, <name>") did NOT appear within ${Math.round(STEP_TIMEOUT / 1000)}s ` +
+          `(LOGIN-STATE signin=${signInStill ? 'present' : 'absent'} hello=absent) — login did NOT complete. Reds HERE at ` +
+          `the login step (li0), not silently shopping unauthenticated. (Bug A: the B2C submit likely did not finish — ` +
+          `the consumer B2C flow is multi-step email→Next→password→Sign in; debug the submit from here.)`,
+      ).toBeTruthy();
       if (!bypassAppliedToB2C && bypassToken) {
         // The B2C redirect never rode our route → the login likely used a cached session; not fatal.
         console.log('[full-shop-flow] note: bypass header route did not fire on B2C (cached session?).');
