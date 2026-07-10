@@ -63,6 +63,15 @@ const BYPASS_HEADER = 'x-vercel-protection-bypass';
  *  runner change) or this spec cap has no effect. */
 const RUN_CAP_MS = 600_000;
 const STEP_TIMEOUT = 20_000;
+// ★ SPEC-OWNED per-action / per-navigation ceilings. The runner applies check.timeout_ms as the page
+//   DEFAULT (runner/index.ts page.setDefaultTimeout) — a PER-ACTION bound, NOT a whole-flow one. A mis-set
+//   check.timeout_ms (the 30000000ms=500min incident) made every UNBOUNDED action inherit a 500-min
+//   ceiling, so one stuck action (an actionability wait / boundingBox / goto) hung ~334s of the flow
+//   budget instead of failing fast. We OVERRIDE that default here so the flow is bounded REGARDLESS of
+//   check.timeout_ms: fast fail + runStep names the step. Explicit per-call timeouts (RUNG_CLICK_TIMEOUT,
+//   STEP_TIMEOUT, the 45s login token wait) still win — these are only the floor for calls that pass none.
+const ACTION_TIMEOUT = 20_000;
+const NAV_TIMEOUT = 30_000;
 
 // ── DIAGNOSTIC TELEMETRY (measurement pass) — per-step timing accumulator, reset per run at test start.
 //    Module-scoped so the shared runStep() can push to it; the test reads it for the FLOW-SUMMARY line. ──
@@ -658,6 +667,13 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     }
   };
 
+  // ★ BOUNDED WAITS (hang fix) — override the per-action ceiling INHERITED from the runner's
+  //   page.setDefaultTimeout(check.timeout_ms). This makes the flow fail FAST + NAMED regardless of how
+  //   check.timeout_ms is set (the 500-min misconfig hung one unbounded action ~334s). Set here, before
+  //   any action, so it governs the whole flow; explicit per-call timeouts still take precedence.
+  page.setDefaultTimeout(ACTION_TIMEOUT);
+  page.setDefaultNavigationTimeout(NAV_TIMEOUT);
+
   // ── DIAGNOSTIC TELEMETRY (measurement pass) ──────────────────────────────────────────────────────
   // Reset the per-run step-timing accumulator, and attach a BROAD cart/order/basket/item API listener so we
   // capture the REAL cart-write endpoint (earlier filters may have MISSED it — capture broadly). Emits one
@@ -916,6 +932,16 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       console.log(`[full-shop-flow] STORE-STATE @before-add store=${sb.store} mode=${sb.mode} bound=${bound}`);
     }
 
+    // ---- STEP: BASELINE CLEAR — start from a known-EMPTY cart (determinism) ------------------------
+    // The cart is server-side + per-account, so it PERSISTS across runs. A previous run whose end-of-flow
+    // teardown was bypassed (e.g. a mid-flow hang killed the run before `finally`) leaves residue that
+    // otherwise ACCUMULATES (the 17-item pile-up) and skews verify-cart-4. Clear to empty FIRST and verify
+    // the badge → 0 (clearCart throws STEP-FAIL 'baseline-clear-cart' with the residual count if it can't),
+    // so every run starts deterministic regardless of prior state — and the accumulation cannot recur even
+    // if this run's own teardown is later skipped. Runs AFTER store-binding (the cart is fulfillment-scoped).
+    abortIfOverCap();
+    await clearCart(page, 'baseline-clear-cart');
+
     // ---- STEP(s): search + add each item (REUSED search selectors; NET-NEW add-to-cart) ------------
     for (const item of SHOPPING_ITEMS) {
       abortIfOverCap();
@@ -1100,8 +1126,8 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
 /** Teardown — clear every cart line item (NET-NEW / UNVERIFIED). Best-effort loop with a cap so it can
  *  never hang; tries per-item Remove, then a bulk "clear/empty cart" affordance. Verify from first-fire
  *  diag: a scheduled monitor MUST end with an empty cart. */
-async function clearCart(page: Page): Promise<void> {
-  await step('clear-cart (teardown)', async () => {
+async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<void> {
+  await step(label, async () => {
     await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
     await dismissInterstitials(page);
     for (let i = 0; i < 12; i++) {
@@ -1116,10 +1142,10 @@ async function clearCart(page: Page): Promise<void> {
     const remaining = page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true });
     const left = await countSafe(remaining);
     if (left > 0) {
-      const d = await captureStepDiag(page, 'clear-cart').catch(() => ({ full: '', compact: '' }));
-      console.log(`[full-shop-flow] STEP-FAIL clear-cart DIAG ${d.full}`);
+      const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
+      console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
       if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
-      throw new Error(`${d.compact} :: clear-cart: ${left} item(s) remain — teardown incomplete (NET-NEW selector; fix from diag BEFORE scheduling).`);
+      throw new Error(`${d.compact} :: ${label}: ${left} item(s) remain — cart not empty (NET-NEW selector; fix from diag BEFORE scheduling).`);
     }
   });
 }
