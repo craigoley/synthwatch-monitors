@@ -52,6 +52,18 @@ import { test, expect, step, dismissInterstitials, credential, type Page } from 
 
 // ── Config ────────────────────────────────────────────────────────────────────────────────────────
 const SHOPPING_ITEMS = ['milk', 'eggs', 'bread', 'bananas'] as const;
+// ★ PINNED PDPs — DETERMINISTIC product selection (immune to search boost/reorder). Trace 933812: the
+// "bananas" search landed on a BOOSTED/promoted 92928-Sweet-Cherries that hijacked the first-result
+// position. Navigate DIRECTLY to the product's PDP and assert the landed product-id. milk + bananas are
+// KNOWN (Craig-specified). ★ eggs/bread IDs were NOT recoverable here: this is a sensitive monitor, so the
+// runner strips NETWORK from trace_signals (only console survives) and the SUCCESSFUL PDP urls appear in no
+// console line — only the FAILED bananas url (92928-Sweet-Cherries) does. So eggs/bread fall back to search
+// + a landed-CATEGORY assertion (which still REJECTS a boost-hijack). ★ TO PIN them: add their id here, e.g.
+//   eggs: '<id>-Large-Eggs', bread: '<id>-...'  (from a run's /shop/product/ nav once available).
+const PRODUCT_PDPS: Partial<Record<(typeof SHOPPING_ITEMS)[number], string>> = {
+  milk: '93989-2-Reduced-Fat-Milk',
+  bananas: '92685-Bananas-Sold-by-the-Each',
+};
 const B2C_HOST = 'myaccount.wegmans.com';
 const BYPASS_HEADER = 'x-vercel-protection-bypass';
 /** Hard wall-clock cap: abort to teardown before this. Kept well under the runner's per-run budget AND
@@ -946,36 +958,56 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     for (const item of SHOPPING_ITEMS) {
       abortIfOverCap();
       await runStep(page, `add-${item}`, async () => {
-        // REUSED: direct-URL search + first product card (search-product.spec.ts).
-        await page.goto(`https://www.wegmans.com/shop/search?query=${encodeURIComponent(item)}`, { waitUntil: 'domcontentloaded' });
-        await dismissInterstitials(page);
-        const firstProduct = page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
-        await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
-
-        // ★ ROOT-CAUSE FIX (this PR): the add MUST commit on the PDP, whose LARGE, clearly-labeled
-        // "Add to Cart" button reliably transforms into a stepper (Craig's screenshots) — NOT on
-        // /shop/search, whose COMPACT "+" circle is a no-op under automation. The OLD code clicked
-        // firstProduct with `.catch(() => {})`, so a tile click that did NOT navigate was SILENTLY
-        // SWALLOWED: the flow stayed on /shop/search (the observed add-* STEP-FAIL finalUrl) and then
-        // clicked the search "+", which arm-on-transform correctly proved never commits (cart0, zero
-        // cart-writes). Make the PDP navigation EXPLICIT + VERIFIED: capture the product href, click the
-        // tile, and if we did NOT land on /shop/product/, navigate to the href directly. Then HARD-ASSERT
-        // we are on a PDP before hunting for "Add to Cart" — so the compact search "+" can never be the
-        // control we click. Store/fulfillment context is per-browser-context (set in select-store-mckinley)
-        // and persists across this same-context navigation, so the PDP still shows the authenticated add.
-        const productHref = (await firstProduct.getAttribute('href').catch(() => null)) ?? '';
-        await firstProduct.click({ timeout: 5000 }).catch(() => {});
-        const onPdp = await page.waitForURL(/\/shop\/product\//, { timeout: 8000 }).then(() => true).catch(() => false);
-        if (!onPdp && productHref) {
-          const productUrl = new URL(productHref, 'https://www.wegmans.com').toString();
-          await page.goto(productUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        // ★ FULFILLMENT-DRIFT GUARD (trace 933812 saw Pickup→Delivery at bananas): items must go to the
+        // PICKUP cart. Re-check the context is not Delivery before each add. Direct PDP nav may sidestep the
+        // drift; if it recurs, FAIL loudly (a Delivery cart would silently diverge from the pickup flow).
+        const fmode = (await readFulfillmentState(page).catch(() => ({ mode: 'none' }))).mode;
+        console.log(`[full-shop-flow] FULFILLMENT-CHECK @before-add-${item} mode=${fmode}`);
+        if (fmode === 'delivery') {
+          throw new Error(`add-${item}: fulfillment DRIFTED to Delivery (flow set Pickup) — items would enter a Delivery cart. Re-establish Pickup.`);
         }
-        await dismissInterstitials(page);
-        await expect(
-          page,
-          `add-${item}: did not reach a product detail page (/shop/product/…) — the search tile click did not ` +
-            `navigate and the direct product-URL fallback failed; the add must run on the PDP, never the search "+".`,
-        ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
+
+        // ★ PRODUCT SELECTION — pinned PDP (deterministic) OR search+category-guard fallback. The add MUST
+        // commit on the PDP (its LARGE buy-box "Add to Cart" transforms to a stepper; the /shop/search "+"
+        // is a no-op under automation), so both paths land + HARD-ASSERT a /shop/product/ URL before the add.
+        const pinned = PRODUCT_PDPS[item];
+        if (pinned) {
+          // PINNED: go DIRECTLY to the product's PDP — immune to search boost/reorder (the cherries bug).
+          await page.goto(`https://www.wegmans.com/shop/product/${pinned}`, { waitUntil: 'domcontentloaded' });
+          await dismissInterstitials(page);
+          const pinnedId = pinned.split('-')[0]; // leading numeric product id, e.g. 92685
+          await expect(
+            page,
+            `add-${item}: not on the pinned PDP /shop/product/${pinned} — wrong product landed (verify from url).`,
+          ).toHaveURL(new RegExp(`/shop/product/${pinnedId}-`, 'i'), { timeout: STEP_TIMEOUT });
+        } else {
+          // UNPINNED (eggs/bread — id not yet known): search + first result → PDP, THEN assert the landed
+          // PDP is the right CATEGORY so a boosted/wrong product (the cherries-for-bananas hijack) REDS
+          // instead of adding the wrong item. Pin these by adding their id to PRODUCT_PDPS once known.
+          await page.goto(`https://www.wegmans.com/shop/search?query=${encodeURIComponent(item)}`, { waitUntil: 'domcontentloaded' });
+          await dismissInterstitials(page);
+          const firstProduct = page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
+          await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
+          const productHref = (await firstProduct.getAttribute('href').catch(() => null)) ?? '';
+          await firstProduct.click({ timeout: 5000 }).catch(() => {});
+          const onPdp = await page.waitForURL(/\/shop\/product\//, { timeout: 8000 }).then(() => true).catch(() => false);
+          if (!onPdp && productHref) {
+            await page.goto(new URL(productHref, 'https://www.wegmans.com').toString(), { waitUntil: 'domcontentloaded' }).catch(() => {});
+          }
+          await dismissInterstitials(page);
+          await expect(
+            page,
+            `add-${item}: did not reach a product detail page (/shop/product/…).`,
+          ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
+          // CATEGORY GUARD: the landed PDP must mention the item word (eggs→egg, bread→bread) — rejects a
+          // boosted/merchandised mismatch like the cherries-for-bananas hijack.
+          const word = item.replace(/s$/, ''); // eggs → egg
+          const categoryOk = await isVisibleSafe(page.getByText(new RegExp(`\\b${word}`, 'i')).first());
+          expect(
+            categoryOk,
+            `add-${item}: landed PDP does not mention "${word}" — a boosted/wrong product likely hijacked the search; pin ${item}'s id in PRODUCT_PDPS.`,
+          ).toBeTruthy();
+        }
 
         // ★ ROOT-CAUSE FIX (trace 925854 DOM — DISPOSITIVE): the OLD selector — getByRole(name:/add to
         // cart/i).or(button[class*=add][class*=cart]) with .first() — matched the WRONG control. On the
@@ -1128,25 +1160,44 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
  *  diag: a scheduled monitor MUST end with an empty cart. */
 async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<void> {
   await step(label, async () => {
-    await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await dismissInterstitials(page);
-    for (let i = 0; i < 12; i++) {
-      const remove = page.getByRole('button', { name: /^remove$|remove item|delete item/i }).filter({ visible: true }).first();
-      if (!(await remove.isVisible({ timeout: 1500 }).catch(() => false))) break;
-      await remove.click({ timeout: 4000 }).catch(() => {});
+    // ★ DURABLE, VERIFIED clear (trace 933812: badge went 0,0,…,3,3 — the old per-item removes cleared the
+    // DOM optimistically but didn't PERSIST server-side, and the assert-empty read DOM cart-item elements,
+    // not the cart BADGE — so it passed while the cart still had 3). Now: up to MAX_PASSES passes; each pass
+    // removes items one-at-a-time (re-querying, since removal re-indexes the list), then RE-NAVIGATES fresh
+    // and reads the cart BADGE (server truth, via readCartCount) — an optimistic DOM removal that didn't
+    // persist is caught by the fresh-nav badge and re-cleared next pass. Empty (badge 0) → return; still
+    // non-empty after MAX_PASSES → STEP-FAIL with the residual count (loud, not silent).
+    const MAX_PASSES = 3;
+    let remaining = -1;
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
       await dismissInterstitials(page);
+      // Remove the first visible item until none remain (re-query each iteration — removal re-indexes).
+      for (let i = 0; i < 30; i++) {
+        const remove = page.getByRole('button', { name: /^remove$|remove item|delete item/i }).filter({ visible: true }).first();
+        if (!(await remove.isVisible({ timeout: 1500 }).catch(() => false))) break;
+        await remove.click({ timeout: 4000 }).catch(() => {});
+        await dismissInterstitials(page);
+      }
+      const bulkClear = page.getByRole('button', { name: /clear cart|empty cart|remove all/i }).filter({ visible: true }).first();
+      if (await bulkClear.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await bulkClear.click({ timeout: 4000 }).catch(() => {});
+        await dismissInterstitials(page);
+      }
+      // ★ VERIFY DURABLY EMPTY via a FRESH nav + the cart BADGE (server state, not optimistic DOM).
+      await page.goto('https://www.wegmans.com/shop/cart', { waitUntil: 'domcontentloaded' }).catch(() => {});
+      await dismissInterstitials(page);
+      const badge = await readCartCount(page);
+      const domItems = await countSafe(page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true }));
+      remaining = badge ?? domItems; // prefer the badge (server truth); fall back to the DOM count
+      console.log(`[full-shop-flow] CLEAR-CART ${label} pass=${pass + 1} badge=${badge ?? '?'} domItems=${domItems} remaining=${remaining}`);
+      if (remaining <= 0) return; // durably empty
     }
-    const bulkClear = page.getByRole('button', { name: /clear cart|empty cart|remove all/i }).filter({ visible: true }).first();
-    if (await bulkClear.isVisible({ timeout: 1500 }).catch(() => false)) await bulkClear.click({ timeout: 4000 }).catch(() => {});
-    // Assert empty so a red teardown is VISIBLE (a dirty cart must not pass silently).
-    const remaining = page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true });
-    const left = await countSafe(remaining);
-    if (left > 0) {
-      const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
-      console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
-      if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
-      throw new Error(`${d.compact} :: ${label}: ${left} item(s) remain — cart not empty (NET-NEW selector; fix from diag BEFORE scheduling).`);
-    }
+    // Still not empty after MAX_PASSES → loud STEP-FAIL with the residual count.
+    const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
+    console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
+    if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
+    throw new Error(`${d.compact} :: ${label}: ${remaining} item(s) remain after ${MAX_PASSES} clear passes — cart not DURABLY empty (removes not persisting server-side).`);
   });
 }
 
