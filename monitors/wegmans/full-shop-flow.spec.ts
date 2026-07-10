@@ -1474,7 +1474,11 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           // ── SUB-STEP 6: EMPTY-CLICKED — click "Empty My Cart" (the trash-icon dropdown item). ───────────
           failedAt = 'EMPTY-CLICKED';
           const emptyClicked = await emptyItem.click({ timeout: 4000 }).then(() => true).catch(() => false);
-          await dismissInterstitials(page);
+          // ★ DELIBERATELY NO broad dismissInterstitials() here (#91). It clicks ANY visible close/dismiss/
+          //   continue button and can CLOSE the "Delete Items" confirm dialog before we click "Yes, delete
+          //   items" — a prime suspect for "menu opens but cart stays 5" (the confirm auto-dismissed). The
+          //   only overlay that legitimately needs clearing between the empty-click and the confirm is the
+          //   cookie banner, handled by the SCOPED dismissCookieBanner in SUB-STEP 7 below.
           await crumb('EMPTY-CLICKED', emptyClicked ? 'OK' : 'FAIL', `${tag} clicked=${emptyClicked ? 'y' : 'n'}`);
 
           // ── SUB-STEP 7: DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Live screenshots:
@@ -1495,18 +1499,33 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           await dismissCookieBanner(page);
           await crumb('DIALOG-APPEARED', confirmShown ? 'OK' : 'FAIL', `${tag} dialog=${dialogVisible ? 'y' : 'n'} confirmBtn=${confirmShown ? 'y' : 'n'}`);
 
-          if (confirmShown) {
+          // ★ DIALOG-VANISHED probe (#91): the confirm button rendered but is GONE after the (scoped,
+          //   cookie-only) dismiss above — some overlay-dismissal closed the dialog before we could confirm.
+          //   Surfaced explicitly so one fire rules dismiss-closes-dialog in or out for good.
+          const dialogSurvived = confirmShown ? await isVisibleSafe(confirmBtn) : false;
+          if (confirmShown && !dialogSurvived) {
+            failedAt = 'DIALOG-VANISHED';
+            await crumb('DIALOG-VANISHED', 'FAIL', `${tag} confirm-btn-gone-after-cookie-dismiss`);
+          }
+
+          if (dialogSurvived) {
             // ── SUB-STEP 8: CONFIRM-CLICKED — click "Yes, delete items". ─────────────────────────────────
             failedAt = 'CONFIRM-CLICKED';
             const writesBeforeConfirm = clearWrites.length;
+            // ★ Arm the clear-write wait BEFORE the confirm click (#91) so a fast server response can't land
+            //   between the click and a later waitForResponse arm. (The always-on onClearResp listener still
+            //   records every write; this promise is only the bounded wait for one to arrive.)
+            const delRespPromise = page
+              .waitForResponse((r) => isCartClearWrite(r.request().method(), r.url(), r.status()), { timeout: 6000 })
+              .catch(() => null);
             const confirmClicked = await confirmBtn.click({ timeout: 4000 }).then(() => true).catch(() => false);
-            await dismissInterstitials(page);
+            await dismissInterstitials(page); // safe now — the confirm has been clicked / dialog actioned
             await crumb('CONFIRM-CLICKED', confirmClicked ? 'OK' : 'FAIL', `${tag} clicked=${confirmClicked ? 'y' : 'n'}`);
 
             // ── SUB-STEP 9: DELETE-FIRED — did a cart-clear/delete NETWORK write fire after the confirm? ──
-            //    Give the request a bounded window to land (no hard sleep) then read what the listener saw.
+            //    The wait was armed before the click; read what the listener saw once it settles.
             failedAt = 'DELETE-FIRED';
-            await page.waitForResponse((r) => isCartClearWrite(r.request().method(), r.url(), r.status()), { timeout: 6000 }).catch(() => null);
+            await delRespPromise;
             const fired = clearWrites.slice(writesBeforeConfirm);
             const lastWrite = fired[fired.length - 1];
             await crumb(
@@ -1533,6 +1552,10 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       // failing sub-step; the breadcrumb (every CLEAR-STEP line) is folded into the thrown error_message so
       // the persisted failure trace pinpoints WHERE the clear broke (nav / cookie / meatball / menu-open /
       // empty-click / dialog / confirm / delete-fired / final-count) with initial=N final=M — no more guessing.
+      // ★ SERVER-PERSIST classification (#91): every client sub-step succeeded AND a clear-write fired, yet
+      //   the count held — the server accepted the delete but didn't persist it (a different bug class than
+      //   any client-side break; route the fix at the API, not the UI flow).
+      if (failedAt === 'FINAL-COUNT' && clearWrites.length > 0) failedAt = 'SERVER-PERSIST';
       const summary = await clearStep(page, label, 'SUMMARY', 'FAIL', `failedAt=${failedAt} initial=${initialCount} final=${remaining} attempts=${MAX_ATTEMPTS}`);
       const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
       console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
