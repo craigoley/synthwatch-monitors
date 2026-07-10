@@ -1262,16 +1262,53 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           await dismissInterstitials(page);
         }
 
-        // 3) Confirm dialog (Wegmans likely confirms before emptying) — a role=dialog "Empty"/"Confirm"/"Yes".
-        //    A native confirm is already auto-accepted by the page.on('dialog') handler above.
-        const confirm = page
-          .getByRole('dialog')
-          .getByRole('button', { name: /^empty( my cart)?$|^confirm$|^yes.*$|^ok$|remove all|empty cart/i })
-          .or(page.getByRole('button', { name: /^empty my cart$|^yes,? empty|confirm empty/i }))
+        // 3) CONFIRM the empty. Clicking "Empty My Cart" opens a confirmation modal (trace 934905: confirm/yes/
+        //    dialog text present) that the OLD selector never clicked: it scoped the affirmative button INSIDE
+        //    getByRole('dialog'), but the real modal is role=alertdialog / a custom div, so a bare "Yes"/
+        //    "Confirm"/"OK" button matched NEITHER branch → the dialog sat open, no empty fired, cart stayed
+        //    non-empty (fail-loud correctly caught it). Fix: wait for ANY visible modal container, then click its
+        //    AFFIRMATIVE button — matched broadly (empty/yes/confirm/ok/remove all/delete/clear) but EXCLUDING
+        //    negatives (cancel/keep/no/close/go back/continue shopping) so we CONFIRM, never dismiss. A native
+        //    window.confirm is already auto-accepted by the page.on('dialog') handler above.
+        const AFFIRM = /^\s*(empty|yes|confirm|ok|remove all|delete|clear)\b|empty (my )?cart/i;
+        const NEGATE = /cancel|keep|go ?back|dismiss|^\s*no\b|^\s*close\b|continue shopping/i;
+        const modal = page
+          .locator('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="dialog" i]')
           .filter({ visible: true })
-          .first();
-        if (await confirm.isVisible({ timeout: 2500 }).catch(() => false)) {
-          await confirm.click({ timeout: 4000 }).catch(() => {});
+          .last();
+        // Prefer a button INSIDE the modal; fall back to a page-wide affirmative (some modals carry no
+        // role/class). Wait for the confirm affordance to actually render — not a 2.5s race.
+        const confirm = modal
+          .getByRole('button', { name: AFFIRM })
+          .or(page.getByRole('button', { name: AFFIRM }))
+          .filter({ visible: true });
+        await confirm.first().waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+        // Cookie banner can overlay the modal (screenshot showed a cookie "Close"): dismiss COOKIES ONLY here
+        // (never a generic close — that could dismiss the confirm modal itself).
+        await page
+          .getByRole('button', { name: /accept( all)?( cookies)?/i })
+          .filter({ visible: true })
+          .first()
+          .click({ timeout: 1500 })
+          .catch(() => {});
+        // Read every affirmative candidate's label (non-mutating), log them for first-fire tuning, then click
+        // the first that is NOT a negative.
+        const cc = await confirm.count().catch(() => 0);
+        const cand: Array<{ k: number; nm: string }> = [];
+        for (let k = 0; k < Math.min(cc, 8); k++) {
+          const btn = confirm.nth(k);
+          const raw =
+            (await btn.getAttribute('aria-label').catch(() => null)) || (await btn.innerText().catch(() => '')) || '';
+          cand.push({ k, nm: raw.replace(/\s+/g, ' ').trim() });
+        }
+        const pick = cand.find((c) => c.nm && !NEGATE.test(c.nm));
+        console.log(
+          `[full-shop-flow] CLEAR-CART ${label} confirm candidates=[${cand
+            .map((c) => c.nm.slice(0, 40) || '∅')
+            .join(' | ')}] pick=${pick ? pick.nm.slice(0, 40) : 'NONE'}`,
+        );
+        if (pick) {
+          await confirm.nth(pick.k).click({ timeout: 4000 }).catch(() => {});
           await dismissInterstitials(page);
         }
 
