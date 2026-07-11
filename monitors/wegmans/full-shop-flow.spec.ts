@@ -326,7 +326,7 @@ function isCartWrite(method: string, url: string, status: number): boolean {
   if (method === 'GET' || method === 'HEAD') return false;
   let host = '';
   try {
-    host = new URL(url).host.toLowerCase();
+    host = new URL(url).hostname.toLowerCase();
   } catch {
     return false;
   }
@@ -348,11 +348,17 @@ function isFulfillmentWrite(method: string, url: string, status: number): boolea
   if (method === 'GET' || method === 'HEAD') return false;
   let host = '';
   try {
-    host = new URL(url).host.toLowerCase();
+    host = new URL(url).hostname.toLowerCase();
   } catch {
     return false;
   }
-  const onWegmansApi = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+  // ★ FALSE-NEGATIVE FIX (mirrors isCartWrite #81): the REAL production fulfillment write is a POST to
+  // api.digitaldevelopment.wegmans.CLOUD/commerce/instacart/fulfillment/service_options/pickup (200) —
+  // "digitaldevelopment" is the Wegmans Digital team's PRODUCTION APIM host, NOT a dev env. The old gate
+  // matched only *.wegmans.COM, so it REJECTED the real successful set-store write and logged setStoreWrite=n
+  // (a false negative). Accept *.wegmans.cloud too (still scoped to wegmans commerce hosts + a fulfillment/
+  // store path — never analytics/3rd-party). host uses .hostname (drops any :port that breaks the $ anchor).
+  const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
   return onWegmansApi && /\/(store|stores|fulfil|pickup|context|session|shopping-?mode|order|cart|basket)/i.test(url) && status < 500;
 }
 
@@ -707,11 +713,13 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       const url = resp.url();
       let host = '';
       try {
-        host = new URL(url).host.toLowerCase();
+        host = new URL(url).hostname.toLowerCase();
       } catch {
         return;
       }
-      const onWegmans = /(^|\.)wegmans\.com$/.test(host) || /wegapi|kitting/i.test(host);
+      // ★ accept *.wegmans.cloud (prod APIM) too — else real .cloud cart writes never log a CART-API line
+      //   nor increment cartWriteCount (false-negative telemetry). Same widening as isCartWrite (#81).
+      const onWegmans = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
       if (!onWegmans || !/\/(cart|basket|order|line-?items?|cart-items|checkout|add)/i.test(url)) return;
       const status = resp.status();
       cartApiCalls.push({ method, status, path: safeLoc(url) });
@@ -1263,7 +1271,7 @@ function isCartClearWrite(method: string, url: string, status: number): boolean 
   if (isCartWrite(method, url, status)) return true;
   let host = '';
   try {
-    host = new URL(url).host.toLowerCase();
+    host = new URL(url).hostname.toLowerCase();
   } catch {
     return false;
   }
