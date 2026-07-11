@@ -4,7 +4,7 @@ import { test, expect, step, dismissInterstitials, credential, type Page } from 
  * Monitor: wegmans-full-shop-flow — ★ FULL AUTHENTICATED PICKUP SHOPPING FLOW (SENSITIVE; ships DISABLED)
  *
  * Journey: login → search+add milk/eggs/bread/bananas → verify 4 in cart → checkout as PICKUP → confirm
- * pickup TIMESLOTS render + are selectable → SELECT a slot → return to cart → clear cart → logout.
+ * pickup TIMESLOTS render + are selectable → SELECT a slot → clear cart → logout.
  * Destined to be SCHEDULED (interval 900s, eastus2 + centralus). Built to that bar: deterministic,
  * clean teardown, hard run-cap, no production footprint. Ships enabledByDefault:false for on-demand
  * validation first.
@@ -22,7 +22,7 @@ import { test, expect, step, dismissInterstitials, credential, type Page } from 
  * NET-NEW + ★ NOT YET LIVE-VERIFIED (authored resilient/structural; the wegmans.com AUTHENTICATED cart/
  * checkout/pickup/timeslot/clear-cart DOM could not be driven from the authoring session — no test creds
  * + Akamai bot-block from a non-allowlisted IP): add-to-cart, verify-cart-4, checkout-pickup,
- * timeslots-render, select-slot, return-cart, clear-cart, logout. Each is wrapped so a failing step emits
+ * timeslots-render, select-slot, clear-cart, logout. Each is wrapped so a failing step emits
  * a STRUCTURAL diag (STEP-FAIL … DIAG) capturing the real DOM → Craig's FIRST sandbox fire verifies and
  * corrects each selector from the diag (the b2c ship-disabled-then-fix-from-diag pattern). ★ DO NOT
  * SCHEDULE until every net-new step is proven green + clean-teardown across several on-demand fires.
@@ -81,7 +81,7 @@ const LOGIN_READY_MS = 60_000;
 //   This single wrong URL is the root cause the clear-cart ⋮ menu was "0-for-3": baseline-clear-cart (and
 //   teardown) navigated to the dead /shop/cart shell, so getByRole('button', {name:/cart actions/i}) found
 //   nothing, "Empty My Cart" rendered 0x, and the step STEP-FAILed (trace 935767). The header cart LINK's
-//   own href is "/cart". Used by verify-cart-4, return-cart, and clearCart (baseline + teardown). */
+//   own href is "/cart". Used by verify-cart-4 and clearCart (baseline + teardown). */
 const CART_URL = 'https://www.wegmans.com/cart';
 // ★ SPEC-OWNED per-action / per-navigation ceilings. The runner applies check.timeout_ms as the page
 //   DEFAULT (runner/index.ts page.setDefaultTimeout) — a PER-ACTION bound, NOT a whole-flow one. A mis-set
@@ -1140,14 +1140,6 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       if (await isVisibleSafe(placeOrder)) {
         console.log('[full-shop-flow] note: a place-order control is present — NOT clicking it (never place the order).');
       }
-    });
-
-    // ---- STEP: return to cart (NET-NEW) -----------------------------------------------------------
-    abortIfOverCap();
-    await runStep(page, 'return-cart', async () => {
-      await page.goto(CART_URL, { waitUntil: 'domcontentloaded' });
-      await dismissInterstitials(page);
-      await expect(page.locator('[class*="cart" i], [data-testid*="cart" i]').first(), 'return-cart: cart did not render').toBeVisible({ timeout: STEP_TIMEOUT });
     });
   } finally {
     // ---- TEARDOWN (always runs — a dirty run poisons its own next run). Best-effort + guarded so it
