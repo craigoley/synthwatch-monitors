@@ -95,9 +95,6 @@ const CART_URL = 'https://www.wegmans.com/cart';
 const ACTION_TIMEOUT = 20_000;
 const NAV_TIMEOUT = 30_000;
 
-// ── DIAGNOSTIC TELEMETRY (measurement pass) — per-step timing accumulator, reset per run at test start.
-//    Module-scoped so the shared runStep() can push to it; the test reads it for the FLOW-SUMMARY line. ──
-const stepTimings: Array<{ name: string; ms: number; failed: boolean }> = [];
 const LOGGED_IN_AFFORDANCE_RX = /account|profile|orders|my wegmans|rewards|sign ?out|log ?out|hello|welcome/i;
 
 // ── Redaction-safe helpers (inlined; a spec cannot import another spec — lib/* won't resolve at runtime) ──
@@ -665,11 +662,9 @@ async function runStep(page: Page, name: string, body: () => Promise<void>): Pro
     try {
       await body();
       const ms = Date.now() - t0;
-      stepTimings.push({ name, ms, failed: false });
       console.log(`[full-shop-flow] STEP-TIMING ${name} ${ms}ms`);
     } catch (err) {
       const ms = Date.now() - t0;
-      stepTimings.push({ name, ms, failed: true });
       console.log(`[full-shop-flow] STEP-TIMING ${name} ${ms}ms FAILED`);
       const d = await captureStepDiag(page, name).catch(() => ({ full: '', compact: '' }));
       console.log(`[full-shop-flow] STEP-FAIL ${name} DIAG ${d.full}`); // Node stdout (deep-dive)
@@ -704,35 +699,11 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
   page.setDefaultTimeout(ACTION_TIMEOUT);
   page.setDefaultNavigationTimeout(NAV_TIMEOUT);
 
-  // ── DIAGNOSTIC TELEMETRY (measurement pass) ──────────────────────────────────────────────────────
-  // Reset the per-run step-timing accumulator, and attach a BROAD cart/order/basket/item API listener so we
-  // capture the REAL cart-write endpoint (earlier filters may have MISSED it — capture broadly). Emits one
-  // CART-API line per matching call + counts non-GET writes. Structural only (method/status/host+path).
-  stepTimings.length = 0;
-  const cartApiCalls: Array<{ method: string; status: number; path: string }> = [];
-  let cartWriteCount = 0;
-  page.on('response', (resp) => {
-    try {
-      const method = resp.request().method();
-      const url = resp.url();
-      let host = '';
-      try {
-        host = new URL(url).hostname.toLowerCase();
-      } catch {
-        return;
-      }
-      // ★ accept *.wegmans.cloud (prod APIM) too — else real .cloud cart writes never log a CART-API line
-      //   nor increment cartWriteCount (false-negative telemetry). Same widening as isCartWrite (#81).
-      const onWegmans = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
-      if (!onWegmans || !/\/(cart|basket|order|line-?items?|cart-items|checkout|add)/i.test(url)) return;
-      const status = resp.status();
-      cartApiCalls.push({ method, status, path: safeLoc(url) });
-      if (method !== 'GET' && method !== 'HEAD' && status < 500) cartWriteCount++;
-      console.log(`[full-shop-flow] CART-API ${method} ${status} ${safeLoc(url)}`);
-    } catch {
-      /* telemetry never breaks the flow */
-    }
-  });
+  // (Removed the DIAGNOSTIC CART-API listener + cartApiCalls/cartWriteCount + the stepTimings accumulator:
+  //  #96 deleted their only readers — CART-STATE and FLOW-SUMMARY — leaving them write-only. The listener
+  //  fired on every network response for the whole run and its `console.log('CART-API …')` went to Node
+  //  stdout only (NOT captured in the trace). The add ASSERTION is unaffected: it uses the ladder's own
+  //  local `cartWrites` array + the stepper-transform signal, never this module-level cartWriteCount.)
 
   // Reuse b2c: the runner injects the bypass header for www.wegmans.com but NOT myaccount.wegmans.com
   // (PROTECTED_BYPASS_HOSTS omits it) — inject it host-scoped here so the login redirect carries it.
@@ -1275,7 +1246,10 @@ async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 
     {
       name: 'hydrate+locator',
       run: async () => {
-        await page.waitForLoadState('networkidle', { timeout: 1500 }).catch(() => {});
+        // (Removed a `waitForLoadState('networkidle', 1500)` settle here — the SAME never-can-fire pattern
+        // #96 cut on the add path at :469/:1066: Wegmans holds persistent astutebot/emplifi/LaunchDarkly
+        // sockets open, so networkidle never resolves and paid its full 1500ms on every menu-open. The
+        // scrollIntoView + click below already auto-wait for actionability.)
         await t.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
         await t.click({ timeout: RUNG_CLICK_TIMEOUT });
       },

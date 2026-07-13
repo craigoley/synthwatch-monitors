@@ -62,15 +62,19 @@ test('SynthWatch dashboard loads', async ({ page }) => {
     // the grid has rows (count > 0) + the first card is visible is the signal that CANNOT be true when
     // the fleet view is broken. Count (not an exact number) keeps it robust to fleet-size changes.
     const cards = page.locator('main a[href*="/checks/"]');
-    const n = await cards.count();
-    expect(
-      n,
-      'SynthWatch dashboard: the monitor grid rendered 0 rows — /api/checks returned no monitors or the client failed to render them (the shell + heading still render, so the old spec stayed green here).',
-    ).toBeGreaterThan(0);
+    // Wait for the grid to PAINT its first card (a CEILING — free unless hit) BEFORE counting. This is the
+    // load-bearing red-on-empty gate: a genuinely empty grid (dead data layer) never paints a card, so this
+    // times out at 15s → throws → RED. It also fixes a paint-race that produced 4 spurious "0 rows" reds
+    // (2026-07-12, verified: /api/checks returned 200 with data — checks 4 + 33 were green — but the client
+    // had not yet rendered the /checks/<id> cards when the OLD code read count() the instant the 200 landed).
     await expect(
       cards.first(),
-      'SynthWatch dashboard: the first monitor card is not visible — the grid did not paint its rows.',
+      'SynthWatch dashboard: the monitor grid rendered 0 rows — /api/checks returned no monitors or the client failed to render them (the shell + heading still render, so a vacuous check would stay green here).',
     ).toBeVisible({ timeout: 15_000 });
+    // With the grid painted, the count is now stable — assert ≥1 row (documents the "grid has rows" intent;
+    // guaranteed once the first card is visible, so this is belt-and-suspenders, not the race-prone gate).
+    const n = await cards.count();
+    expect(n, `SynthWatch dashboard: expected ≥1 monitor card, counted ${n}.`).toBeGreaterThan(0);
 
     // Supplementary (NOT load-bearing): the Monitors view heading. Kept as a shell signal, but it can
     // no longer carry a pass on its own — GATE 1 + GATE 2 above are the functional gates.
