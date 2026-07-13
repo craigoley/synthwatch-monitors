@@ -52,3 +52,5 @@ jobs:
         run: npm run typecheck
       - name: Compile-check scripts (every spec parses + lists)
         run: npx playwright test --list
+      - name: Unit red-tests (guard logic — proves the staple guard REDS on a boosted promo)
+        run: npm run test:unit

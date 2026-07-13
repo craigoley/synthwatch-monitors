@@ -15,12 +15,25 @@ export default defineConfig({
   testMatch: '**/*.spec.ts',
   timeout: 60_000,
   expect: { timeout: 15_000 },
-  // Identifiable synthetic UA -- SynthWatch overrides at runtime, but this keeps
-  // local/CI runs distinguishable too.
-  use: {
-    ...devices['Desktop Chrome'],
-    userAgent: 'SynthWatch-Monitor/1.0 (+https://github.com/craigoley/synthwatch-monitors)',
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
-  },
+  projects: [
+    {
+      // The monitor specs (browser). Local/CI use `--list` to compile-check; the RUNNER executes them.
+      name: 'monitors',
+      testDir: './monitors',
+      testMatch: '**/*.spec.ts',
+      use: {
+        ...devices['Desktop Chrome'],
+        userAgent: 'SynthWatch-Monitor/1.0 (+https://github.com/craigoley/synthwatch-monitors)',
+        trace: 'retain-on-failure',
+        screenshot: 'only-on-failure',
+      },
+    },
+    {
+      // PURE unit red-tests over the guard logic (tests/). NO browser device → runs in CI without Chrome
+      // installed (`npm run test:unit` / `playwright test --project=unit`). Never touches the live site.
+      name: 'unit',
+      testDir: './tests',
+      testMatch: '**/*.spec.ts',
+    },
+  ],
 });

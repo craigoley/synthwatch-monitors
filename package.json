@@ -9,7 +9,8 @@
     "validate:manifest": "node scripts/validate-manifest.mjs",
     "check:matchers": "node scripts/check-matchers.mjs",
     "test:compile": "playwright test --list",
-    "check": "npm run validate:manifest && npm run check:matchers && npm run typecheck && npm run test:compile"
+    "check": "npm run validate:manifest && npm run check:matchers && npm run typecheck && npm run test:compile && npm run test:unit",
+    "test:unit": "playwright test --project=unit"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
