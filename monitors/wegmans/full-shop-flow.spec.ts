@@ -958,19 +958,19 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         await page.goto(`https://www.wegmans.com/shop/search?query=${encodeURIComponent(item)}`, { waitUntil: 'domcontentloaded' });
         await dismissInterstitials(page);
 
-        // ★ RESULT SELECTION. Milk/eggs: the first visible product card is correct. BANANAS and BREAD are
-        // guarded — both have been HIJACKED by a boosted result at position #1:
-        //   • bananas (trace 933812): a boosted 92928-Sweet-Cherries → selectBananaResult() picks the ACTUAL
-        //     banana (92685, by id/name) and rejects flavored look-alikes.
-        //   • bread (trace 955866, VERIFIED live 2026-07-13): a boosted SEASONAL 32939 "Red, White & Blue
-        //     Half Loaf Bread" (July-4th promo, ephemeral SKU whose Product API transiently failed to fetch
-        //     → no buy-box → STEP-FAIL) → selectBreadResult() skips seasonal/promo loaves and picks a STAPLE.
-        // Still a SEARCH-result click (in-context) for all items, never direct product-URL nav.
+        // ★ RESULT SELECTION — every staple is GUARDED against the boosted-merchandise hijack (a raw .first()
+        // would silently add the boosted #1, and verify-cart-4 counts, not identity → a false green):
+        //   • bananas (trace 933812): a boosted 92928-Sweet-Cherries → selectBananaResult() pins the ACTUAL
+        //     banana (id 92685, deterministic) and rejects flavored look-alikes.
+        //   • milk / eggs / bread: selectStapleResult(require, reject) — require the staple, reject seasonal/
+        //     promo/candy/off-category (MERCH_REJECT). Catches the July-4th "Red, White & Blue" loaf→bread
+        //     (trace 955866) AND the live time bomb: Easter chocolate/Cadbury-creme eggs→"eggs".
+        // Still a SEARCH-result click (in-context) for all items, never direct product-URL nav (#83).
         const firstProduct =
           item === 'bananas'
             ? await selectBananaResult(page)
-            : item === 'bread'
-              ? await selectBreadResult(page)
+            : STAPLE_GUARDS[item]
+              ? await selectStapleResult(page, { item, ...STAPLE_GUARDS[item] })
               : page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
         await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
 
@@ -1002,16 +1002,20 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           ).toBeTruthy();
         }
 
-        // ★ BREAD VERIFY: reject a SEASONAL/PROMO loaf that slipped past selectBreadResult (trace 955866 —
-        // the boosted 32939 "Red, White & Blue" July-4th promo). A staple bread has a stable, non-ephemeral
-        // buy-box; a seasonal promo does not (and will be retired). Reds loudly rather than adding a promo.
-        if (item === 'bread') {
+        // ★ STAPLE VERIFY (milk / eggs / bread): confirm the landed PDP slug IS the intended staple and is
+        // NOT a merchandised/seasonal/promo look-alike, BEFORE the add commits. This is the must-go-red that
+        // turns a SILENT wrong-item add into a loud failure: verify-cart-4 only COUNTS items (not identity),
+        // so without this a boosted promo with a working buy-box (a July-4th loaf, an Easter Cadbury creme
+        // egg) would add and the run would PASS with candy in the cart — a false green. Reds loudly instead.
+        const guard = STAPLE_GUARDS[item];
+        if (guard) {
           const slug = page.url().split('/shop/product/')[1] ?? '';
-          const isSeasonalPromo = /red.?white.?blue|patriotic|pumpkin.?spice|holiday|seasonal|limited.?edition|valentine|christmas|easter|halloween|shamrock|peppermint|eggnog|gingerbread/i.test(slug);
+          const landedIsStaple = guard.require.test(slug) && !guard.reject.test(slug);
           expect(
-            !isSeasonalPromo,
-            `add-bread: landed PDP "${slug}" is a SEASONAL/PROMO loaf (boosted into the "bread" results) — ` +
-              `an ephemeral SKU; selectBreadResult should have picked a staple. Re-recon bread selection.`,
+            landedIsStaple,
+            `add-${item}: landed PDP "${slug}" is not a staple ${item} — a boosted seasonal/promo/candy result ` +
+              `hijacked the "${item}" search. The monitor must NOT silently add the wrong item (verify-cart-4 ` +
+              `counts, not identity). Re-recon ${item} selection.`,
           ).toBeTruthy();
         }
 
@@ -1114,10 +1118,28 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     await runStep(page, 'checkout-pickup', async () => {
       await page.getByRole('button', { name: /checkout|proceed to checkout/i }).or(page.getByRole('link', { name: /checkout/i })).filter({ visible: true }).first().click({ timeout: 5000 });
       await dismissInterstitials(page);
+      // Select PICKUP (interaction). The pickup control's fulfillment BINDING is already asserted at
+      // select-store-mckinley (readFulfillmentState); here we just click it to drive scheduling.
       const pickup = page.getByRole('button', { name: /pickup/i }).or(page.getByRole('radio', { name: /pickup/i })).or(page.getByText(/pick ?up/i)).filter({ visible: true }).first();
-      await expect(pickup, 'checkout-pickup: PICKUP fulfillment option not found on the checkout page (verified-by-passing: 30/30 green over 7d; absent here means the checkout/pickup UI did not render).').toBeVisible({ timeout: STEP_TIMEOUT });
-      await pickup.click({ timeout: 5000 }).catch(() => {});
+      if (await isVisibleSafe(pickup)) await pickup.click({ timeout: 5000 }).catch(() => {});
       await dismissInterstitials(page);
+      // ★ HARDENED ASSERTION — prove the Checkout click ADVANCED past the cart to the scheduling step, via a
+      // CHECKOUT-PAGE artifact that CANNOT be true otherwise. The OLD assertion (a /pick ?up/i text match)
+      // lived in the PERSISTENT HEADER fulfillment toggle → it would pass even if the Checkout click never
+      // advanced (the check-223 assert-chrome shape, in miniature). The pickup-timeslot container is a
+      // scheduling-page artifact ABSENT on /cart and ABSENT from the header — and it is DOM-VERIFIED (the
+      // next step, timeslots-render, asserts this exact selector and passes 30/30 over 7d). (The
+      // authenticated /checkout DOM cannot be driven anonymously — it redirects to B2C — so the verified
+      // timeslot container is the anchor; a "choose a time"/"schedule" heading is OR'd in as a bonus only,
+      // it never gates the pass.)
+      const scheduling = page
+        .locator('[class*="timeslot" i], [class*="time-slot" i], [data-testid*="slot" i]')
+        .or(page.getByRole('heading', { name: /choose a (pickup )?time|schedule (your )?(pickup|order)|select a (pickup )?time|reserve (a|your) time|when would you like/i }))
+        .filter({ visible: true });
+      await expect(
+        scheduling.first(),
+        'checkout-pickup: the Checkout click did NOT advance to the pickup scheduling step — no timeslot/scheduling artifact rendered. (A "Pickup" label alone lives in the persistent header toggle and is NOT proof the checkout advanced; the cart may be blocked or the checkout did not proceed.)',
+      ).toBeVisible({ timeout: STEP_TIMEOUT });
     });
 
     // ---- STEP: timeslots render + selectable -------------------------------------------------------
@@ -1160,20 +1182,38 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
  *  (the produce item) — while REJECTING flavored/merchandised look-alikes (Sweet Cherries, Banana Pudding,
  *  Banana Pepper, banana bread/chips/muffins, …). Throws LOUD if no banana is present — a silent .first()
  *  would add the wrong item (the original bug). Still returns a RESULT anchor to click (in-context nav). */
-/** Pick an ACTUAL STAPLE bread from the "bread" search results, REJECTING boosted SEASONAL/PROMO loaves.
- *  Trace 955866 (2026-07-13): a raw .first() grabbed the boosted seasonal 32939 "Red, White & Blue Half
- *  Loaf Bread" (a July-4th promo, VERIFIED live as the #1 "bread" result). That ephemeral SKU's client-side
- *  Product API "Failed to fetch (api.digitaldevelopment.wegmans.cloud)" that run, so its buy-box never
- *  rendered → the pre-ladder Add-to-Cart visibility check timed out → STEP-FAIL. Milk/eggs (same run,
- *  staple products) committed fine, so it was NOT the selector — it was the boosted promo. Same class as
- *  the boosted-cherries banana hijack: a search that can put a seasonal/ephemeral item at #1 is a flaky
- *  monitor. Picks the FIRST visible result that is a plain bread by name/slug and is NOT a seasonal/holiday
- *  promo. Still a SEARCH-result click (in-context) — never direct product-URL nav. Throws LOUD if the
- *  results are all promos. */
-async function selectBreadResult(page: Page): Promise<Loc> {
+// ★ MERCHANDISER-BOOST REJECT — the union of seasonal/holiday/promo/off-category terms a merchandiser
+//   boosts to the top of a staple query. This is the class that hijacked "bananas" (→ Sweet Cherries, #84)
+//   and "bread" (→ a July-4th "Red, White & Blue" loaf, #100), and that WILL hijack "eggs" at Easter
+//   (Cadbury creme eggs, chocolate eggs, dye kits, Peeps). A raw .first() falls for it; worse, a promo with
+//   a WORKING buy-box adds SILENTLY — verify-cart-4 COUNTS items, not IDENTITY, so the run would pass with
+//   candy in the cart (a false green). Extend this list as new merchandising patterns appear.
+const MERCH_REJECT =
+  /red.?white.?blue|patriotic|independence|memorial.?day|labor.?day|easter|cadbury|creme ?egg|peeps|dye.?kit|jelly.?bean|\bcandy\b|chocolate|\bcookie|\bcake\b|cupcake|dessert|pudding|egg.?nog|\bnog\b|pumpkin.?spice|gingerbread|peppermint|shamrock|st\.?.?patrick|valentine|christmas|hanukkah|halloween|thanksgiving|holiday|seasonal|limited.?edition|gift.?(set|basket|card)|\bbundle\b|scented|candle|\bsoap\b|shampoo|lotion|\bkit\b|flavored/i;
+
+// ★ Per-staple guard config: REQUIRE the result IS the intended staple (slug + link text). Shared across
+//   milk/eggs/bread; bananas keeps its own id-pinned guard (selectBananaResult) — do not fold it in here or
+//   it loses the deterministic 92685 pin.
+const STAPLE_GUARDS: Record<string, { require: RegExp; reject: RegExp }> = {
+  milk: { require: /\bmilk\b/i, reject: MERCH_REJECT },
+  eggs: { require: /\beggs?\b/i, reject: MERCH_REJECT },
+  bread: {
+    require: /bread|loaf|baguette|bagel|\brolls?\b|\bbuns?\b|ciabatta|\bpita\b|naan|sourdough|brioche|challah|focaccia|\brye\b|multigrain/i,
+    reject: MERCH_REJECT,
+  },
+};
+
+/** Generalized staple-search guard — the shared shape of selectBananaResult (#84) and selectBreadResult
+ *  (#100): pick the FIRST visible search result that IS the intended staple (`require`) and is NOT a
+ *  merchandised/seasonal/promo/off-category look-alike (`reject`), matched on BOTH the slug and the link
+ *  text. Defeats the boosted-merchandise hijack (cherries→bananas; a July-4th "Red, White & Blue"
+ *  loaf→bread; and — the live time bomb — Easter chocolate/creme eggs→"eggs"). ★ CRITICAL: without this a
+ *  promo with a WORKING buy-box adds SILENTLY (verify-cart-4 counts, not identity → a FALSE GREEN with candy
+ *  in the cart). Still a SEARCH-result click (in-context) — never a /shop/product/ direct nav (#83 broke
+ *  session continuity). Throws LOUD if no matching staple exists — never a silent .first() fallback. The
+ *  landed-PDP verify in the add step is the second half of the guard (rejects a promo that slipped through). */
+async function selectStapleResult(page: Page, opts: { item: string; require: RegExp; reject: RegExp }): Promise<Loc> {
   const anchors = page.locator('a[href*="/shop/product/"]').filter({ visible: true });
-  const SEASONAL_PROMO = /red.?white.?blue|patriotic|pumpkin.?spice|holiday|seasonal|limited.?edition|valentine|christmas|easter|halloween|shamrock|peppermint|eggnog|gingerbread/i;
-  const STAPLE_BREAD = /bread|loaf|baguette|bagel|\brolls?\b|\bbuns?\b|ciabatta|\bpita\b|naan|sourdough|brioche|challah|focaccia|\brye\b|multigrain/i;
   const n = await anchors.count();
   for (let i = 0; i < n; i++) {
     const a = anchors.nth(i);
@@ -1181,11 +1221,11 @@ async function selectBreadResult(page: Page): Promise<Loc> {
     const name = ((await a.textContent().catch(() => '')) ?? '').trim();
     const slug = href.split('/shop/product/')[1] ?? '';
     const text = `${slug} ${name}`;
-    if (STAPLE_BREAD.test(text) && !SEASONAL_PROMO.test(text)) return a;
+    if (opts.require.test(text) && !opts.reject.test(text)) return a;
   }
   throw new Error(
-    'add-bread: no STAPLE bread in the search results (only seasonal/promo loaves like "Red, White & Blue") — ' +
-      'the search boost changed; re-recon bread selection.',
+    `add-${opts.item}: no staple "${opts.item}" in the search results — only boosted/merchandised look-alikes ` +
+      `(seasonal promo / candy / off-category). The search boost changed; re-recon ${opts.item} selection.`,
   );
 }
 
