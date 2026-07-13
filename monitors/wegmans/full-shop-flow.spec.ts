@@ -54,13 +54,15 @@ import { test, expect, step, dismissInterstitials, credential, type Page } from 
 const SHOPPING_ITEMS = ['milk', 'eggs', 'bread', 'bananas'] as const;
 const B2C_HOST = 'myaccount.wegmans.com';
 const BYPASS_HEADER = 'x-vercel-protection-bypass';
-/** Hard wall-clock cap: abort to teardown before this. Kept well under the runner's per-run budget AND
- *  the 15-min tick so a run can't bleed into the next tick (concurrency axis b).
- *  ★ TEMPORARY / DIAGNOSTIC (measurement pass): raised 200_000 → 600_000 so a legitimately-long authenticated
- *  flow runs to its natural end and the trace is NOT truncated while we map where time goes. TUNE BACK to a
- *  production budget once the real completion time is measured. NOTE: the BINDING truncation is RUNNER-SIDE —
- *  runner/index.ts MAX_FLOW_MS = 180_000 kills the browser run first; that must be raised too (companion
- *  runner change) or this spec cap has no effect. */
+/** Hard wall-clock cap: abort to teardown before this, so a run can't bleed into the next tick
+ *  (concurrency axis b). ★ PERMANENT + JUSTIFIED — do NOT lower. This authenticated multi-product cart is
+ *  the fleet's longest flow; its real distribution is p50 247s / p95 317s / p99 450s / max 613s (cost recon
+ *  2026-07-12), so 600s is sized to clear the LEGITIMATE tail — a lower cap would false-red a genuine
+ *  slow-but-successful run. It is deliberately coherent with the runner's whole-flow budget
+ *  (runner/index.ts MAX_FLOW_MS = 600_000, the BINDING limit — this spec cap aborts to teardown just under
+ *  it) and stays under the 660s ACA replicaTimeout (infra/main.bicep) so the run finalizes rather than
+ *  being pod-killed. This is a per-FLOW cap; per-ACTION bounds are ACTION_TIMEOUT/NAV_TIMEOUT/STEP_TIMEOUT
+ *  below. */
 const RUN_CAP_MS = 600_000;
 const STEP_TIMEOUT = 20_000;
 // ★ POST-LOGIN READINESS BUDGET (trace 935622: token event fired + redirect completed + "Hello, <name>"
