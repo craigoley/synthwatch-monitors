@@ -62,3 +62,51 @@ scripts (monitors-as-code) that SynthWatch syncs and runs against production sit
   but is dead at runtime. To add a shared helper: put it inside the markers in `lib/flow.ts`,
   mirror it into the runner's `specfetch/specShim.ts`, and bump its LIBFLOW-VENDOR-SHA (the
   runner's parity CI enforces this). *(from the 2026-07-04 runner recon session — verbatim)*
+
+## Lessons from 2026-07-13
+
+- **Host-gate matchers must accept the real prod host.** The production Wegmans commerce API is
+  `api.digitaldevelopment.wegmans.cloud` (`.cloud`, the Digital team's PRODUCTION APIM — not a dev env)
+  and `*.azure-api.net` — a `/(^|\.)wegmans\.com$/`-only gate REJECTS real 200 writes and logs
+  `cartWrite=n` (a false negative that blinds the monitor to its own success). Derive host with
+  `.hostname`, not `.host` (a `:port` breaks the `$` anchor). Sweep EVERY matcher, not just the one that
+  bit. *(from #81, #93)*
+- **Never `waitForLoadState('networkidle')` on a Wegmans/ad-heavy page** — persistent
+  astutebot/emplifi/LaunchDarkly/Bazaarvoice sockets mean it NEVER idles, so it pays its full timeout on
+  every run (a SETTLE, not an assertion; a step whose avg ≫ p50 is this signature). `waitForTimeout` is
+  banned fleet-wide. Distinguish a timeout CEILING (free unless hit — keep the 45s token / 60s login /
+  20s step / 30s nav) from a SETTLE that pays every run (waste); never "optimize" a ceiling. *(from #82, #96)*
+- **An authenticated login gate must assert the real "Hello, <name>" greeting**, not a generic
+  `/account|orders|sign ?out/i` affordance that is ALSO present logged-OUT — that false-green shopped
+  UNAUTHENTICATED for weeks. The post-login redirect is slow: give the greeting a generous CEILING (60s,
+  free unless hit); the token-event `waitForResponse` already proved auth, so a slow paint must not red a
+  login that succeeded. *(from #79, #88)*
+- **A React/SPA "Add to Cart" click can no-op silently** — correct button, handler not yet wired, or an
+  overlay (emplifi chat / cookie banner, NOT covered by `dismissInterstitials`) intercepts the click.
+  Assert the mutation (cart-write 200 OR the in-place stepper transform), and ladder click strategies
+  (locator → precise-center → raw-pointer → dispatch-events → force), stopping at the first that commits.
+  Target the MAIN product buy-box button, not a recommended item's "add to list". *(from #70–#77, #85–#87)*
+- **The Wegmans cart app is at `https://www.wegmans.com/cart`.** `/shop/cart` is a dead 231-byte JSON
+  shell that mounts no cart route (no ⋮ menu, no line items, no badge) — using it was the root cause of
+  the "0-for-3 Empty My Cart". Used by verify-cart-4 and clearCart. *(from #89)*
+- **Diagnostics must survive to a PERSISTED channel.** A sensitive monitor's trace keeps ONLY the browser
+  console (network + trace zip are stripped for redaction), and Node `console.log` is NOT traced at all.
+  Emit diag to the thrown `error_message` AND the page console (`page.evaluate((m) => console.warn(m), …)`),
+  never Node stdout alone — or the diagnostic you added never survives the run. *(from #59, #90, #91)*
+- **In the fulfillment-scoped cart flow, per-item direct-URL nav (`/shop/product/<id>`) breaks the
+  store/session context** established earlier (a changestore PUT + repeated service_options POSTs between
+  adds), regressing a 4-add flow to 1 item. Stay IN-CONTEXT: `search (/shop/search?query=…)` +
+  select-from-results for every item — do NOT hard-navigate to pinned product URLs. *(from #83 → #84)*
+- **A redundant/vestigial step isn't free — its spurious failure triggers expensive failure-only paths.**
+  `return-cart` re-checked what verify-cart-4 + the teardown clear already covered, and its mid-checkout
+  failure forced the sensitive+FAILED redacted-trace rebuild that OOM'd the runner's finalization
+  (stranding the run at `running`). Remove steps that duplicate coverage. *(from #92)*
+- **Fleet assertion hazards (a browser verdict is just "the spec didn't throw" — no runner backstop):**
+  an http check with `assertions=[]` is status-code-ONLY (the body is never read, so a 200 serving a
+  degraded/error body PASSES) — add a `body`/`json_path` assertion; and a monitor at 100% pass over 30
+  days paired with a weak assertion is the profile of one that asserts NOTHING (the shop-flow's exact
+  profile) — audit it for must-go-red. *(from the 2026-07-12 Fleet Assertion Audit + #94, #95)*
+- **Authenticated monitors read creds via `credential(role)`** (model-B, UI-set, live) — a dead ACA-env
+  secret reads stale/empty and the flow silently runs unauthenticated. Migrate any hand-rolled or
+  env-based cred source to `credential()`, and remove the env fallback so a stale secret can't mask it.
+  *(from #64, #65, #66)*
