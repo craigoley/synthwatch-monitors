@@ -20,6 +20,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: CI shell-safety gate (no fail-open pipe-into-grep)
+        # A CI gate that pipes a variable into grep-q can fail OPEN under `set -euo pipefail`: grep-q
+        # closes the pipe on its first match, the writer gets SIGPIPE (exit 141), and pipefail makes the
+        # pipeline's status unreliable — a gate meant to CATCH something passes anyway (the class the org
+        # hit 5x). Rewrite as a here-string:  grep -q PATTERN <<<"$X"  (no pipe, no SIGPIPE).
+        # This gate scans the workflow + script shell for that pattern. It greps FILES directly (no pipe
+        # into grep), and PAT is spelled to not match itself, so it cannot fail-open on its own definition.
+        run: |
+          set -euo pipefail
+          PAT='\|[[:space:]]*grep'
+          if grep -rnE "$PAT" .github/workflows scripts 2>/dev/null; then
+            echo "::error title=CI shell fail-open::found a pipe-into-grep in CI shell (lines above). Under set -euo pipefail it can fail OPEN — rewrite as a here-string: grep -q P <<<\"\$X\"." >&2
+            exit 1
+          fi
+          echo "CI shell-safety gate OK: no pipe-into-grep pipelines in .github/workflows or scripts."
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
