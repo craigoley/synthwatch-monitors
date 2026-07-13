@@ -1206,9 +1206,14 @@ const MERCH_REJECT =
 // ★ Per-staple guard config: REQUIRE the result IS the intended staple (slug + link text). Shared across
 //   milk/eggs/bread; bananas keeps its own id-pinned guard (selectBananaResult) — do not fold it in here or
 //   it loses the deterministic 92685 pin.
-const STAPLE_GUARDS: Record<string, { require: RegExp; reject: RegExp }> = {
-  milk: { require: /\bmilk\b/i, reject: MERCH_REJECT },
-  eggs: { require: /\beggs?\b/i, reject: MERCH_REJECT },
+// ★ `id` PINS a stable, live-verified staple SKU (milk 55066, eggs 46155 — both confirmed #1 for their
+//   query 2026-07-13), the deterministic path immune to merchandising boost/reorder (same shape as
+//   selectBananaResult's 92685 pin). require/reject is the FALLBACK when the pinned SKU is gone (OOS /
+//   discontinued) — and a fallback FIRE emits STAPLE-PIN-MISS so SKU churn is VISIBLE, not a silent regex
+//   gamble on a rotting blocklist. bread has no single staple SKU, so it stays require/reject only.
+const STAPLE_GUARDS: Record<string, { require: RegExp; reject: RegExp; id?: string }> = {
+  milk: { id: '55066', require: /\bmilk\b/i, reject: MERCH_REJECT },
+  eggs: { id: '46155', require: /\beggs?\b/i, reject: MERCH_REJECT },
   bread: {
     require: /bread|loaf|baguette|bagel|\brolls?\b|\bbuns?\b|ciabatta|\bpita\b|naan|sourdough|brioche|challah|focaccia|\brye\b|multigrain/i,
     reject: MERCH_REJECT,
@@ -1216,28 +1221,47 @@ const STAPLE_GUARDS: Record<string, { require: RegExp; reject: RegExp }> = {
 };
 
 /** Generalized staple-search guard — the shared shape of selectBananaResult (#84) and selectBreadResult
- *  (#100): pick the FIRST visible search result that IS the intended staple (`require`) and is NOT a
- *  merchandised/seasonal/promo/off-category look-alike (`reject`), matched on BOTH the slug and the link
- *  text. Defeats the boosted-merchandise hijack (cherries→bananas; a July-4th "Red, White & Blue"
- *  loaf→bread; and — the live time bomb — Easter chocolate/creme eggs→"eggs"). ★ CRITICAL: without this a
- *  promo with a WORKING buy-box adds SILENTLY (verify-cart-4 counts, not identity → a FALSE GREEN with candy
- *  in the cart). Still a SEARCH-result click (in-context) — never a /shop/product/ direct nav (#83 broke
- *  session continuity). Throws LOUD if no matching staple exists — never a silent .first() fallback. The
- *  landed-PDP verify in the add step is the second half of the guard (rejects a promo that slipped through). */
-async function selectStapleResult(page: Page, opts: { item: string; require: RegExp; reject: RegExp }): Promise<Loc> {
+ *  (#100), now id-PINNED (like bananas' 92685). PRIMARY: return the pinned SKU (opts.id) if present — a
+ *  deterministic anchor immune to merchandising boost/reorder, and immune to blocklist rot (require:
+ *  /\beggs?\b/i alone PASSES "Cadbury Creme Egg"; only the reject term saves it, and the landed-verify uses
+ *  the SAME reject list, so a novel promo term defeats both halves at once — the id-pin sidesteps that
+ *  entirely). FALLBACK: if the pinned SKU is absent (OOS / discontinued), pick the first result that IS the
+ *  staple (`require`) and is NOT merchandised (`reject`), matched on slug + link text — AND emit a loud
+ *  STAPLE-PIN-MISS diag so the SKU churn is VISIBLE (a silent fallback to a rotting blocklist is no better
+ *  than the blocklist). Still a SEARCH-result click (in-context) — never a /shop/product/ direct nav (#83).
+ *  Throws LOUD if no staple exists at all — never a silent .first(). The landed-PDP verify in the add step
+ *  is the second half of the guard. */
+async function selectStapleResult(page: Page, opts: { item: string; require: RegExp; reject: RegExp; id?: string }): Promise<Loc> {
   const anchors = page.locator('a[href*="/shop/product/"]').filter({ visible: true });
+  // PRIMARY — the pinned SKU (deterministic, boost/rot-proof).
+  if (opts.id) {
+    const byId = page.locator(`a[href*="/shop/product/${opts.id}-"]`).filter({ visible: true }).first();
+    if (await byId.isVisible({ timeout: STEP_TIMEOUT }).catch(() => false)) return byId;
+  }
+  // FALLBACK — the pin is absent; take the first require&&!reject result and make the miss LOUD.
   const n = await anchors.count();
+  let firstSlug = '';
   for (let i = 0; i < n; i++) {
     const a = anchors.nth(i);
     const href = (await a.getAttribute('href').catch(() => '')) ?? '';
     const name = ((await a.textContent().catch(() => '')) ?? '').trim();
     const slug = href.split('/shop/product/')[1] ?? '';
-    const text = `${slug} ${name}`;
-    if (opts.require.test(text) && !opts.reject.test(text)) return a;
+    if (!firstSlug) firstSlug = slug;
+    if (opts.require.test(`${slug} ${name}`) && !opts.reject.test(`${slug} ${name}`)) {
+      if (opts.id) {
+        // ★ SKU CHURN IS NOW VISIBLE. Mirror to page-console so it survives the sensitive monitor's
+        //   redaction (page.evaluate(console.warn) → trace_signals.console; Node console.log is NOT traced).
+        const miss = `[full-shop-flow] STAPLE-PIN-MISS ${opts.item} expected=${opts.id} took=${slug} — pinned SKU absent (OOS/discontinued); re-recon the ${opts.item} pin.`;
+        console.log(miss);
+        await page.evaluate((m) => console.warn(m), miss.slice(0, 195)).catch(() => {});
+      }
+      return a;
+    }
   }
   throw new Error(
-    `add-${opts.item}: no staple "${opts.item}" in the search results — only boosted/merchandised look-alikes ` +
-      `(seasonal promo / candy / off-category). The search boost changed; re-recon ${opts.item} selection.`,
+    `add-${opts.item}: no staple "${opts.item}" in the search results (pinned SKU ${opts.id ?? '(none)'} absent; ` +
+      `first result was "${firstSlug || '(none)'}") — only boosted/merchandised look-alikes. The search boost ` +
+      `changed; re-recon ${opts.item} selection.`,
   );
 }
 
