@@ -22,17 +22,18 @@ test('Amore: menu page exposes a downloadable menu', async ({ page }) => {
     await dismissInterstitials(page);
   });
 
-  await step('assert a downloadable menu link is present', async () => {
-    // CAPABILITY (not content): a menu PDF is reachable. Match a .pdf link whose href
-    // mentions "Menu", OR a link named like the menu-download affordance -- resilient to
-    // the exact filename/date and to which menu (food/dessert/beverages).
-    const menuLink = page
-      .locator('a[href$=".pdf"][href*="Menu" i]')
-      .or(page.getByRole('link', { name: /(download|view).*(food )?menu|food menu pdf|menu pdf/i }))
-      .first();
+  await step('assert a downloadable menu PDF is present', async () => {
+    // ★ STRICT — the assertion must be ABSENT ON FAILURE. Match ONLY a menu PDF link:
+    // a[href$=".pdf"][href*="Menu" i]. If every menu PDF vanishes, this has no match -> RED.
+    // (VERIFIED live 2026-07-13: 8 menu PDFs on /menus/, all .pdf with "Menu" in the href —
+    // Amore-Dinner-Menu.pdf / Amore-Dessert-Menu.pdf / Amore-Beverages-Menu.pdf.)
+    // ★ REMOVED a lenient `getByRole('link', {name:/(download|view).*menu/i})` fallback: that could
+    // match a PERSISTENT nav "View Menu" element and stay GREEN even if every PDF were removed (the
+    // check-223 assert-chrome trap). A strict assertion that reds honestly beats a lenient one that lies.
+    const menuLink = page.locator('a[href$=".pdf"][href*="Menu" i]').first();
     await expect(
       menuLink,
-      'Amore menu: no downloadable menu link (a[href$=".pdf"] / "Download Food Menu PDF") on /menus/ -- the menu page is broken.',
+      'Amore menu: no downloadable menu PDF (a[href$=".pdf"][href*="Menu"], e.g. Amore-Dinner-Menu.pdf) on /menus/ -- the menu PDFs are gone or the page is broken.',
     ).toBeVisible({ timeout: 15000 });
   });
 });
