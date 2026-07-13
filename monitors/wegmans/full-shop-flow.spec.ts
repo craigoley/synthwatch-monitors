@@ -437,7 +437,6 @@ async function addToCartLadder(page: Page, item: string, addToCart: Loc, addToCa
   const container = await readAddContainer(addToCart); // recon (b): buy-box vs mini-form
   const rh0 = await readReactHandler(addToCart); // ★ hydration hypothesis, at start
   const readyState = await page.evaluate(() => document.readyState).catch(() => '?');
-  const netIdle = await page.waitForLoadState('networkidle', { timeout: HYDRATE_MS }).then(() => true).catch(() => false);
   const cartBefore = await readCartCount(page);
 
   // ── CART-WRITE LISTENER (attach BEFORE the first click strategy) — the transform-independent commit ──
@@ -465,7 +464,10 @@ async function addToCartLadder(page: Page, item: string, addToCart: Loc, addToCa
     {
       name: 'hydrate+locator',
       run: async () => {
-        await page.waitForLoadState('networkidle', { timeout: HYDRATE_MS }).catch(() => {});
+        // (Removed a `waitForLoadState('networkidle')` settle here: Wegmans keeps persistent
+        // astutebot/emplifi/LaunchDarkly sockets open so the page NEVER goes idle → it paid the full
+        // HYDRATE_MS every run for nothing. The real hydration gate is waitForReactHandler above; the
+        // click below auto-waits for actionability; the add is asserted by the stepper/cart-write commit.)
         await addToCart.first().scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
         await addToCart.first().click({ timeout: RUNG_CLICK_TIMEOUT });
       },
@@ -556,7 +558,7 @@ async function addToCartLadder(page: Page, item: string, addToCart: Loc, addToCa
   const summary =
     `ATC-RESULT ${item} committed=${committedRung ? 'rung' + committedRung : 'NONE'} via=${committedVia || '-'} ` +
     `cartWrites=${cartWrites.length} reactHandlerAtStart=${rh0.handler ? 'y' : 'n'} container=${container} ` +
-    `match=${matchCount}(vis${visMatchCount}) ready=${readyState}/netIdle${netIdle ? 'y' : 'n'} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'}`;
+    `match=${matchCount}(vis${visMatchCount}) ready=${readyState} cart=${cartBefore ?? '?'}->${cartAfter ?? '?'}`;
 
   // Emit EVERY rung line + the summary to BOTH Node stdout (deep-dive) and trace_signals.console.
   for (const line of rungLines) {
@@ -804,7 +806,8 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       const signInStill = await isVisibleSafe(
         page.getByRole('link', { name: /^\s*(sign ?in|log ?in)\s*$/i }).or(page.getByRole('button', { name: /^\s*(sign ?in|log ?in)\s*$/i })),
       );
-      console.log(`[full-shop-flow] LOGIN-STATE signin=${signInStill ? 'present' : 'absent'} hello=${helloSeen ? 'present' : 'absent'}`);
+      // (Removed a standalone LOGIN-STATE console.log; signInStill is kept — it's woven into the greeting
+      //  assertion's failure message below, the forensic that explains WHY a login red happened.)
       expect(
         helloSeen,
         `login: the logged-in header greeting ("Hello, <name>") did NOT appear within ${Math.round(LOGIN_READY_MS / 1000)}s ` +
@@ -953,14 +956,9 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       ).toBeTruthy();
     });
 
-    // ★ STORE-STATE @before-add (measurement): which store/mode is the session ACTUALLY bound to right
-    //    before the first add — surfaces the 108/48/84 mess. (The store step already logged FULFILLMENT-STATE
-    //    @after-store-selection.) Structural: store number + mode + bound boolean only.
-    {
-      const sb = await readFulfillmentState(page).catch(() => ({ store: '?', mode: '?', cart: '?', src: '?' }));
-      const bound = sb.mode === 'pickup' && (sb.store === '84' || /mckinley/i.test(sb.store)) ? 'y' : 'n';
-      console.log(`[full-shop-flow] STORE-STATE @before-add store=${sb.store} mode=${sb.mode} bound=${bound}`);
-    }
+    // (Removed a STORE-STATE @before-add diagnostic block here — an extra readFulfillmentState + log that
+    //  backed NO assertion. The store binding IS asserted above in select-store-mckinley
+    //  (setStoreSeen || boundByState → toBeTruthy), which is the coverage.)
 
     // ---- STEP: BASELINE CLEAR — start from a known-EMPTY cart (determinism) ------------------------
     // The cart is server-side + per-account, so it PERSISTS across runs. A previous run whose end-of-flow
@@ -1062,10 +1060,12 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         await expect(addToCart, `add-${item}: Add to Cart affordance not found (NET-NEW selector — verify from diag)`).toBeVisible({ timeout: STEP_TIMEOUT });
 
         // ── CLICK-FIDELITY PREP ── dismiss any floating "How can we help?"/emplifi chat widget that can
-        // overlay the button + swallow the click (the vendored dismissInterstitials does not cover it),
-        // then let the PDP settle (bounded, signal-based) so React has a chance to wire the add handler.
+        // overlay the button + swallow the click (the vendored dismissInterstitials does not cover it).
+        // (Removed a `waitForLoadState('networkidle', 3000)` PDP settle here: Wegmans NEVER goes idle
+        // — persistent astutebot/emplifi/LaunchDarkly sockets keep the network busy forever — so this paid
+        // its full 3s on EVERY add for a condition that can never occur. React hydration is handled inside
+        // addToCartLadder (waitForReactHandler); the add is gated by the ladder's cart-write/stepper commit.)
         await dismissChatWidget(page);
-        await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
 
         // ═══ ADD-TO-CART — CLICK-STRATEGY LADDER (first-commit-wins; full telemetry on total failure) ═══
         // Craig confirms the add works MANUALLY on this buy-box button → a scripting problem (correct
@@ -1076,19 +1076,11 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         // success it records which strategy committed; on total failure it throws with the full ladder map
         // (every rung's reactHandler / click / transform / cartWrite) — a maximally diagnostic fire either
         // way. runStep wraps a throw into error_message + trace_signals.
-        const cwBefore = cartWriteCount; // ★ CART-STATE: per-item cart-write delta (measurement)
+        // The add ASSERTION lives inside addToCartLadder: it throws if no rung produced the stepper
+        // transform OR a cart-write (the transform-independent commit). (Removed the post-add CART-STATE
+        // diagnostic block here — a second readCartCount + a transform-probe + a log line that backed NO
+        // assertion; the ladder's own commit-or-throw is the coverage.)
         await addToCartLadder(page, item, addToCart, addToCartMatches);
-        // ★ CART-STATE after this add: does the UI transform correspond to a REAL cart entry (count badge +
-        //    a cart-write network call), or is the UI optimistic while the cart stays empty? Structural only.
-        const countBadge = await readCartCount(page).catch(() => null);
-        const transformSeen = await isVisibleSafe(
-          page
-            .locator('[class*="stepper" i], [class*="quantity" i], [data-testid*="quantity" i]')
-            .or(page.getByRole('button', { name: /^\s*[-+]\s*$|remove|delete|increment|decrement/i })),
-        );
-        console.log(
-          `[full-shop-flow] CART-STATE after=${item} countBadge=${countBadge ?? '?'} cartWrite=${cartWriteCount > cwBefore ? 'y' : 'n'} transform=${transformSeen ? 'y' : 'n'}`,
-        );
       });
     }
 
@@ -1154,23 +1146,9 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     //      never throws; clear-cart THEN logout. No lock to release (option 3). --------------------------
     await clearCart(page).catch(() => {});
     await logout(page).catch(() => {});
-
-    // ★ FLOW-SUMMARY (measurement) — the whole run in one line for the trace: total duration, per-step
-    //    durations, final cart count, cart-writes + cart-API calls seen, final store/mode, and which step
-    //    failed (if any). This is the map that picks the next fix. Structural only; best-effort (never throws).
-    try {
-      const totalMs = Date.now() - startedAt;
-      const finalCart = await readCartCount(page).catch(() => null);
-      const fsEnd = await readFulfillmentState(page).catch(() => ({ store: '?', mode: '?', cart: '?', src: '?' }));
-      const failed = stepTimings.filter((s) => s.failed).map((s) => s.name).join(',') || 'none';
-      const steps = stepTimings.map((s) => `${s.name}=${s.ms}${s.failed ? '!' : ''}`).join(' ');
-      console.log(
-        `[full-shop-flow] FLOW-SUMMARY totalMs=${totalMs} finalCart=${finalCart ?? '?'} cartWrites=${cartWriteCount} ` +
-          `cartApis=${cartApiCalls.length} store=${fsEnd.store} mode=${fsEnd.mode} failedStep=${failed} steps=[${steps}]`,
-      );
-    } catch {
-      /* summary is best-effort telemetry — never mask the real outcome */
-    }
+    // (Removed the post-teardown FLOW-SUMMARY block — it ran an extra readCartCount + readFulfillmentState
+    //  + a log line on EVERY run and backed NO assertion; per-step durations are already in run_steps and
+    //  the trace. captureStepDiag still fires on the FAILING step for forensics.)
   }
 });
 
@@ -1405,6 +1383,23 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       const crumb = async (sub: string, result: string, detail = '') => {
         crumbs.push(await clearStep(page, label, sub, result, detail));
       };
+
+      // ── BADGE-FIRST SHORT-CIRCUIT (cost) ──────────────────────────────────────────────────────────
+      // Read the HEADER cart badge on the CURRENT page — NO /cart navigation. A definitive 0 means the cart
+      // is already empty (the common case: the 2026-07-12 recon found the baseline cart already-empty 0/22;
+      // the end-of-flow teardown does the real emptying), so skip the ~9s /cart nav + cart-app-mount +
+      // residual probe entirely. ONLY a hard 0 short-circuits; a null badge (unreadable / no numeric badge)
+      // or >0 falls through to the full nav+clear loop below, which re-verifies server-truth. The
+      // mid-flow-crash guard is INTACT: a dirty cart (badge>0, or an unreadable badge) still runs the full
+      // durable clear + verifies the badge reaches 0.
+      const headerBadge = await readCartCount(page).catch(() => null);
+      if (headerBadge === 0) {
+        initialCount = 0;
+        failedAt = 'none';
+        await crumb('SUMMARY', 'OK', `badge-empty initial=0 final=0 (header badge=0, skipped /cart nav)`);
+        return;
+      }
+
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const tag = `attempt=${attempt + 1}`;
 
