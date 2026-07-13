@@ -971,7 +971,19 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
             ? await selectBananaResult(page)
             : STAPLE_GUARDS[item]
               ? await selectStapleResult(page, { item, ...STAPLE_GUARDS[item] })
-              : page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
+              : // ★ NO SILENT FALLBACK. An unguarded staple must RED, never .first() — a raw .first() would
+                //   SILENTLY add the boosted #1 result (a seasonal/promo hijack, the July-4th bread failure),
+                //   and verify-cart-4 COUNTS items, not identity, so the run would PASS with the wrong item.
+                //   A fifth SHOPPING_ITEMS entry MUST ship with a guard.
+                ((): never => {
+                  throw new Error(
+                    `add-${item}: no result-selection guard for staple "${item}" — it was added to ` +
+                      `SHOPPING_ITEMS without a guard. Refusing to .first() (that would silently add the ` +
+                      `boosted #1 result; verify-cart-4 counts, not identity → a false green). Add a ` +
+                      `STAPLE_GUARDS['${item}'] { require, reject } entry, or a dedicated guard like ` +
+                      `selectBananaResult.`,
+                  );
+                })();
         await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
 
         // The add MUST commit on the PDP, not the search "+". Capture the href, click the tile, and if we
