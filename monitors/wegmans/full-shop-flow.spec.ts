@@ -986,16 +986,20 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         await page.goto(`https://www.wegmans.com/shop/search?query=${encodeURIComponent(item)}`, { waitUntil: 'domcontentloaded' });
         await dismissInterstitials(page);
 
-        // ★ RESULT SELECTION. Most items: the first visible product card is correct. BANANAS is the one
-        // exception — trace 933812: a BOOSTED/promoted 92928-Sweet-Cherries hijacked the first-result
-        // position for the "bananas" query, so a raw .first() added CHERRIES. selectBananaResult() picks
-        // the result that is an ACTUAL banana (product 92685 "Bananas, Sold by the Each", by id/name) and
-        // REJECTS boosted / banana-FLAVORED look-alikes (Sweet Cherries, Banana Pudding, Banana Pepper, …).
-        // Still a SEARCH-result click (in-context), never direct product-URL nav.
+        // ★ RESULT SELECTION. Milk/eggs: the first visible product card is correct. BANANAS and BREAD are
+        // guarded — both have been HIJACKED by a boosted result at position #1:
+        //   • bananas (trace 933812): a boosted 92928-Sweet-Cherries → selectBananaResult() picks the ACTUAL
+        //     banana (92685, by id/name) and rejects flavored look-alikes.
+        //   • bread (trace 955866, VERIFIED live 2026-07-13): a boosted SEASONAL 32939 "Red, White & Blue
+        //     Half Loaf Bread" (July-4th promo, ephemeral SKU whose Product API transiently failed to fetch
+        //     → no buy-box → STEP-FAIL) → selectBreadResult() skips seasonal/promo loaves and picks a STAPLE.
+        // Still a SEARCH-result click (in-context) for all items, never direct product-URL nav.
         const firstProduct =
           item === 'bananas'
             ? await selectBananaResult(page)
-            : page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
+            : item === 'bread'
+              ? await selectBreadResult(page)
+              : page.locator('a[href*="/shop/product/"]').filter({ visible: true }).first();
         await expect(firstProduct, `add-${item}: no product result (a[href*="/shop/product/"]) for "${item}"`).toBeVisible({ timeout: STEP_TIMEOUT });
 
         // The add MUST commit on the PDP, not the search "+". Capture the href, click the tile, and if we
@@ -1023,6 +1027,19 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
             landedIsBanana,
             `add-bananas: landed PDP "${slug}" is not an actual banana (expected 92685 / a "Bananas…" ` +
               `product) — a boosted/flavored result hijacked the search; re-recon banana selection.`,
+          ).toBeTruthy();
+        }
+
+        // ★ BREAD VERIFY: reject a SEASONAL/PROMO loaf that slipped past selectBreadResult (trace 955866 —
+        // the boosted 32939 "Red, White & Blue" July-4th promo). A staple bread has a stable, non-ephemeral
+        // buy-box; a seasonal promo does not (and will be retired). Reds loudly rather than adding a promo.
+        if (item === 'bread') {
+          const slug = page.url().split('/shop/product/')[1] ?? '';
+          const isSeasonalPromo = /red.?white.?blue|patriotic|pumpkin.?spice|holiday|seasonal|limited.?edition|valentine|christmas|easter|halloween|shamrock|peppermint|eggnog|gingerbread/i.test(slug);
+          expect(
+            !isSeasonalPromo,
+            `add-bread: landed PDP "${slug}" is a SEASONAL/PROMO loaf (boosted into the "bread" results) — ` +
+              `an ephemeral SKU; selectBreadResult should have picked a staple. Re-recon bread selection.`,
           ).toBeTruthy();
         }
 
@@ -1059,7 +1076,14 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         if (await isVisibleSafe(unavailable)) {
           throw new Error(`add-${item}: first result is unavailable — widen the search or pick the next in-stock result (determinism gap to close on first fire).`);
         }
-        await expect(addToCart, `add-${item}: Add to Cart affordance not found (NET-NEW selector — verify from diag)`).toBeVisible({ timeout: STEP_TIMEOUT });
+        await expect(
+          addToCart,
+          `add-${item}: the main buy-box "Add to Cart" was not visible within ${Math.round(STEP_TIMEOUT / 1000)}s. ` +
+            `The selector is DOM-VERIFIED (trace 925854 + live 2026-07-13 across the milk/eggs/bread PDPs: ` +
+            `getByRole button /add…to cart/ or [aria-label*="to cart"], excluding the recommended-item ` +
+            `.component--add-to-cart-mini-form). Absent here means the buy-box did not RENDER — the product's ` +
+            `data failed to load (e.g. a client-side Product API "Failed to fetch") or the item is out of stock.`,
+        ).toBeVisible({ timeout: STEP_TIMEOUT });
 
         // ── CLICK-FIDELITY PREP ── dismiss any floating "How can we help?"/emplifi chat widget that can
         // overlay the button + swallow the click (the vendored dismissInterstitials does not cover it).
@@ -1161,6 +1185,35 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
  *  (the produce item) — while REJECTING flavored/merchandised look-alikes (Sweet Cherries, Banana Pudding,
  *  Banana Pepper, banana bread/chips/muffins, …). Throws LOUD if no banana is present — a silent .first()
  *  would add the wrong item (the original bug). Still returns a RESULT anchor to click (in-context nav). */
+/** Pick an ACTUAL STAPLE bread from the "bread" search results, REJECTING boosted SEASONAL/PROMO loaves.
+ *  Trace 955866 (2026-07-13): a raw .first() grabbed the boosted seasonal 32939 "Red, White & Blue Half
+ *  Loaf Bread" (a July-4th promo, VERIFIED live as the #1 "bread" result). That ephemeral SKU's client-side
+ *  Product API "Failed to fetch (api.digitaldevelopment.wegmans.cloud)" that run, so its buy-box never
+ *  rendered → the pre-ladder Add-to-Cart visibility check timed out → STEP-FAIL. Milk/eggs (same run,
+ *  staple products) committed fine, so it was NOT the selector — it was the boosted promo. Same class as
+ *  the boosted-cherries banana hijack: a search that can put a seasonal/ephemeral item at #1 is a flaky
+ *  monitor. Picks the FIRST visible result that is a plain bread by name/slug and is NOT a seasonal/holiday
+ *  promo. Still a SEARCH-result click (in-context) — never direct product-URL nav. Throws LOUD if the
+ *  results are all promos. */
+async function selectBreadResult(page: Page): Promise<Loc> {
+  const anchors = page.locator('a[href*="/shop/product/"]').filter({ visible: true });
+  const SEASONAL_PROMO = /red.?white.?blue|patriotic|pumpkin.?spice|holiday|seasonal|limited.?edition|valentine|christmas|easter|halloween|shamrock|peppermint|eggnog|gingerbread/i;
+  const STAPLE_BREAD = /bread|loaf|baguette|bagel|\brolls?\b|\bbuns?\b|ciabatta|\bpita\b|naan|sourdough|brioche|challah|focaccia|\brye\b|multigrain/i;
+  const n = await anchors.count();
+  for (let i = 0; i < n; i++) {
+    const a = anchors.nth(i);
+    const href = (await a.getAttribute('href').catch(() => '')) ?? '';
+    const name = ((await a.textContent().catch(() => '')) ?? '').trim();
+    const slug = href.split('/shop/product/')[1] ?? '';
+    const text = `${slug} ${name}`;
+    if (STAPLE_BREAD.test(text) && !SEASONAL_PROMO.test(text)) return a;
+  }
+  throw new Error(
+    'add-bread: no STAPLE bread in the search results (only seasonal/promo loaves like "Red, White & Blue") — ' +
+      'the search boost changed; re-recon bread selection.',
+  );
+}
+
 async function selectBananaResult(page: Page): Promise<Loc> {
   const anchors = page.locator('a[href*="/shop/product/"]').filter({ visible: true });
   // Primary: the exact banana product id 92685 — deterministic, immune to boost/reorder.
