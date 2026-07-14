@@ -32,16 +32,33 @@ You edit a monitor  ->  PR to this repo  ->  CI gates it (manifest + typecheck +
 
 ## Adding a monitor
 
+> ★ **READ THIS FIRST — the one thing that breaks production on day one.**
+> **Import ONLY from `../../lib/flow`.** A new shared module (`lib/helpers.ts`,
+> `./utils`, anything else) **WILL NOT COMPILE in the runner** — SynthWatch fetches
+> each spec **single-file** at `main`'s HEAD and esbuilds it with exactly one import
+> alias (`lib/flow`). Your spec type-checks and runs locally, then fails at runtime in
+> the runner. If you need a shared helper, add it **inside the `SHARED-WITH-RUNNER-SPECSHIM`
+> markers in `lib/flow.ts`** and mirror it into the runner's `specShim.ts` (see
+> `CLAUDE.md`) — that is the only shared surface. Do not create a second module.
+
 1. Copy `monitors/synthwatch/dashboard-homepage.spec.ts` (the template) to
    `monitors/<area>/<name>.spec.ts`.
 2. Write the journey as named steps (`step('search', async () => { ... })`) using
    **resilient locators** (`getByRole` / `getByText`) and asserting **stable
    signals** (URL patterns, visible text) — not brittle CSS paths. See `lib/flow.ts`.
+   Import test helpers from `../../lib/flow` (`test`, `expect`, `step`,
+   `dismissInterstitials`, `assertLoaded`, `credential`) — **and nothing else** (see
+   the box above).
 3. Add a matching entry to `manifest.json` with a **unique, never-reused `id`**.
 4. Open a PR. CI validates the manifest ↔ scripts are in sync, type-checks, and
    confirms every script parses. Once merged, SynthWatch syncs it.
 
 Run `npm run check` locally to validate before pushing.
+
+> _Verified 2026-07-14 — NO AUTOMATED CHECK. This section (and the pin tables below) are
+> hand-written prose; only `db/schema.sql`, the enum unions, and the contract fixtures are
+> CI-gated against drift. **Distrust this doc if the code disagrees** — the code
+> (`lib/flow.ts`, `manifest.schema.json`, `.github/workflows/check.yml`) is the source of truth._
 
 ## Selector resilience (important)
 
@@ -119,7 +136,8 @@ a monitored site. Network calls go to the monitored target, not internal service
 ```
 manifest.json            registry: id -> script binding (what SynthWatch reads)
 manifest.schema.json     JSON schema for the manifest
-lib/flow.ts              shared helpers: step(), assertLoaded(), dismissInterstitials()
+lib/flow.ts              THE ONLY importable shared module (single-file fetch): step(),
+                         assertLoaded(), dismissInterstitials(), credential(), + test/expect
 monitors/<area>/*.spec.ts   the Playwright monitor scripts
 scripts/validate-manifest.mjs   CI: manifest <-> scripts in sync, ids valid/unique
 playwright.config.ts     local/CI config (SynthWatch applies its own at runtime)
