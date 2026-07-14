@@ -1,8 +1,20 @@
-# Runbook — `wegmans-full-shop-flow` first-fire validation
+# Runbook — `wegmans-full-shop-flow` first-fire validation — ★ ARCHIVED (HISTORICAL)
 
-**Monitor:** `wegmans-full-shop-flow` (check `id=355`, `sensitive=true`, `enabled=false`, `interval=900s`).
-**Goal:** drive the 8 net-new UNVERIFIED selector steps to green + clean teardown across several on-demand
-sandbox fires, correcting each selector from `OTHER-DIAG` evidence, BEFORE the monitor is ever scheduled.
+> ★ **VALIDATION COMPLETE — HISTORICAL (as of 2026-07-09). This is a record of a one-time
+> validation phase that is OVER.** `wegmans-full-shop-flow` (check `id=355`) is now
+> **enabled, scheduled, and passing** — the 8 net-new steps below were validated and the
+> `NET-NEW` markers resolved (#101). **This runbook no longer describes current state.**
+> ★ For the monitor's **LIVE** status (enabled / interval / recent runs) go to the
+> **dashboard**, never this doc — a hand-typed DB snapshot rots the moment the DB moves
+> (this one did: it said `enabled=false, interval=900`; reality is `enabled=t, interval=1800`).
+> Kept for the validation *narrative* (the diagnose-from-`OTHER-DIAG` loop), not its state.
+>
+> _Verified 2026-07-09 — NO AUTOMATED CHECK. Distrust any state claim here if the DB disagrees._
+
+**Monitor (at validation time):** `wegmans-full-shop-flow` (check `id=355`, `sensitive=true`).
+**Goal (then):** drive the 8 net-new UNVERIFIED selector steps to green + clean teardown across several
+on-demand sandbox fires, correcting each selector from `OTHER-DIAG` evidence, BEFORE the monitor is ever
+scheduled.
 
 **Why this runbook exists:** the shop-flow spec (#61) reuses live-proven selectors for login/search/diag but
 authors 8 net-new authenticated selectors that could NOT be live-verified during authoring (no test creds
@@ -15,18 +27,14 @@ it executes nothing against live Wegmans.
 
 ---
 
-## Current state (verified 2026-07-09, from the DB)
+## Live state — NOT in this doc (deleted on purpose)
 
-| fact | value |
-|---|---|
-| materialized in `checks`? | **YES** — `id=355`, `enabled=f`, `sensitive=t`, `interval=900`, `redact_patterns` set |
-| reconcile drift / pending plan? | **none** — fully reconciled (no `new` drift, no pending plan) |
-| runs so far | **1** — `2026-07-09 11:37:44Z`, `status=error`, `sandbox=t`, `retry_count=1` |
-| that run's failure | `[full-shop-flow] required secret env "SHOP_TEST_USER" not set on the runner` — **died at login before any browser opened** |
-| `check_locations` | `centralus, eastus2, westus2` — ★ includes `westus2`, contrary to the intended `eastus2 + centralus` posture |
-
-**So the monitor is materialized and disabled — the blocker to validation is NOT materialization; it is
-that the login secrets are not set on the runner (STEP 0).**
+★ A hand-typed DB snapshot lived here and rotted (it claimed `enabled=false, interval=900`; reality moved
+to `enabled=t, interval=1800`). It is **deleted, not updated** — mirroring live state in prose with no gate
+just re-arms the same fuse. For the monitor's current `enabled` / `interval` / `check_locations` / recent
+runs, read the **dashboard** (or `SELECT … FROM checks WHERE source_key='wegmans-full-shop-flow'`), which is
+the source of truth. (A doc-build step could *generate* this table from the DB — see the audit; until then,
+there is deliberately no state table here to go stale.)
 
 ---
 
