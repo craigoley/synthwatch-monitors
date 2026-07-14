@@ -2,6 +2,16 @@
 
 Playwright monitor scripts for [SynthWatch](https://github.com/craigoley/synthwatch).
 
+> ★★ **THE #1 DAY-ONE RULE — read before you write a line.**
+> **A monitor spec may import ONLY from `../../lib/flow`.** A new shared module
+> (`lib/helpers.ts`, `./utils`, anything else) **WILL NOT COMPILE in the runner** —
+> SynthWatch fetches each spec **single-file** at `main`'s HEAD and esbuilds it with
+> exactly one import alias (`lib/flow`). It type-checks and runs locally, then fails at
+> runtime in the runner. Need a shared helper? Add it inside the
+> `SHARED-WITH-RUNNER-SPECSHIM` markers in `lib/flow.ts` and mirror it into the runner's
+> `specShim.ts` (see `CLAUDE.md`) — that is the only shared surface. **Do not create a
+> second module.**
+
 This repo holds the **browser-monitor scripts** SynthWatch runs as synthetic monitors.
 It exists so that **adding or fixing a monitor is a pull request here — reviewed,
 gated, and synced live — *without* redeploying SynthWatch.** The script (the *how*)
@@ -22,6 +32,8 @@ You edit a monitor  ->  PR to this repo  ->  CI gates it (manifest + typecheck +
 1. **`manifest.json`** is the registry. Each entry binds a stable `id` (the key a
    SynthWatch monitor references) to a script under `monitors/`. SynthWatch reads
    this after syncing the repo to know which monitors exist and what to call them.
+   ★ **The field-by-field shape is `manifest.schema.json`** (the source of truth —
+   ajv-gated by `scripts/validate-manifest.mjs` in CI); read that, not a prose copy here.
 2. **`monitors/`** holds the Playwright scripts, organized by area
    (`monitors/wegmans/...`, `monitors/synthwatch/...`). Each is a standard
    Playwright test file using `test.step(...)` so SynthWatch's run-step funnel
@@ -32,14 +44,7 @@ You edit a monitor  ->  PR to this repo  ->  CI gates it (manifest + typecheck +
 
 ## Adding a monitor
 
-> ★ **READ THIS FIRST — the one thing that breaks production on day one.**
-> **Import ONLY from `../../lib/flow`.** A new shared module (`lib/helpers.ts`,
-> `./utils`, anything else) **WILL NOT COMPILE in the runner** — SynthWatch fetches
-> each spec **single-file** at `main`'s HEAD and esbuilds it with exactly one import
-> alias (`lib/flow`). Your spec type-checks and runs locally, then fails at runtime in
-> the runner. If you need a shared helper, add it **inside the `SHARED-WITH-RUNNER-SPECSHIM`
-> markers in `lib/flow.ts`** and mirror it into the runner's `specShim.ts` (see
-> `CLAUDE.md`) — that is the only shared surface. Do not create a second module.
+★ Import **only** from `../../lib/flow` — see the **#1 day-one rule** at the top of this README.
 
 1. Copy `monitors/synthwatch/dashboard-homepage.spec.ts` (the template) to
    `monitors/<area>/<name>.spec.ts`.
@@ -48,68 +53,57 @@ You edit a monitor  ->  PR to this repo  ->  CI gates it (manifest + typecheck +
    signals** (URL patterns, visible text) — not brittle CSS paths. See `lib/flow.ts`.
    Import test helpers from `../../lib/flow` (`test`, `expect`, `step`,
    `dismissInterstitials`, `assertLoaded`, `credential`) — **and nothing else** (see
-   the box above).
+   the #1 day-one rule at the top).
 3. Add a matching entry to `manifest.json` with a **unique, never-reused `id`**.
 4. Open a PR. CI validates the manifest ↔ scripts are in sync, type-checks, and
    confirms every script parses. Once merged, SynthWatch syncs it.
 
 Run `npm run check` locally to validate before pushing.
 
-> _Verified 2026-07-14 — NO AUTOMATED CHECK. This section (and the pin tables below) are
-> hand-written prose; only `db/schema.sql`, the enum unions, and the contract fixtures are
-> CI-gated against drift. **Distrust this doc if the code disagrees** — the code
-> (`lib/flow.ts`, `manifest.schema.json`, `.github/workflows/check.yml`) is the source of truth._
+> _Verified 2026-07-14 — NO AUTOMATED CHECK. This is hand-written prose; only `db/schema.sql`,
+> the enum unions, and the contract fixtures are CI-gated against drift. **Distrust this doc if
+> the code disagrees** — the code (`lib/flow.ts`, `manifest.schema.json`,
+> `.github/workflows/check.yml`) is the source of truth._
 
-## Selector resilience (important)
+## Rollback
 
-Production sites change their DOM constantly. Brittle selectors break on the next
-site deploy and page you for a "monitoring outage" that's really just the site
-changing. Always prefer role/text-based locators and assert on what a *user* would
-see (a title, a URL shape), not exact structure. SynthWatch's AI root-cause
-classifier labels such breaks **selector-drift** (update the monitor) vs
-**real-outage** (the site is down) — resilient selectors keep the false-outage rate
-low.
+> ★ **DRAFT · UNREHEARSED · NEVER EXECUTED.** _Verified 2026-07-14 — NO AUTOMATED CHECK. This
+> procedure has not been run; treat it as a starting point, not a tested runbook. Distrust it
+> if the platform disagrees._
+
+Two different things are called "roll back", with **two different mechanisms**:
+
+1. **Roll back a monitor CHANGE (a bad spec edit) → revert the PR.** The runner serves monitors
+   from `main` at **HEAD** (no pinned SHA), so once the revert merges and SynthWatch re-syncs,
+   the previous spec is live. A normal repo action (PR + auto-merge).
+2. **DISABLE a monitor (stop it running / paging) → a dashboard/DB action, NOT a repo action:**
+   set `checks.enabled = false` for that monitor in the platform. ★ **Do NOT delete the spec to
+   "disable" it** — removing a `monitors/*.spec.ts` without its `manifest.json` entry (or
+   vice-versa) **trips `validate-manifest.mjs`** (manifest ↔ scripts must stay 1:1); and even a
+   clean delete removes only the *code*, not the *schedule* — the check row keeps trying to run.
+   Disable is the `enabled` flag, in the platform.
+
+⚠️ **Re-sync cadence lives in the RUNNER, not this repo** — how fast a revert or a new spec
+reaches production depends on the runner's sync interval (configured there). A merge here is
+not instantly live.
+
+## Selector resilience
+
+Prefer role/text locators (`getByRole`/`getByText`) and assert a **stable** signal (a URL
+shape, key visible text) — never exact CSS structure. The rationale + the convention live
+in **`lib/flow.ts`** (header docstring, ~lines 3–19): a brittle selector reds as
+**selector-drift** (update the monitor) rather than a real **outage**; keeping the
+false-outage rate low is the whole game.
 
 ## Pin & entry freshness
 
-This writes DOWN the fleet's existing pin policy — it already lives in spec-header
-comments and failure messages; this section just consolidates it.
-
-Monitors deliberately pin volatile, site-owned values because deterministic entry beats
-racy UI navigation (see `CLAUDE.md`: "bypass racy autocomplete"). The known pin classes:
-
-| pin class | examples (monitor → pin) | where stated |
-|---|---|---|
-| Direct-URL entry slugs | meals2go-browse-menu → `/browse-menu/pizza-wings`; meals2go-catering-browse → `/browse-catering/custom-cakes?cuisine=1985`; wegmans-shop-category-browse → `/shop/search?category=beverages`; wegmans-recipe-search → `/recipes/search?query=chicken` | each spec's header + failure message |
-| Catalog/query terms | search-product → "ginger sparkling water"; recipe-search → "chicken"; search-autocomplete → "milk" (chosen always-in-catalog; a delisting reds as selector-drift, not outage) | spec headers |
-| Store context | browse-menu/catering → auto-selected default store (store 16 observed; geo/IP-derived, deliberately NOT hardcoded in the network anchor — `meals2go-catering-browse.spec.ts` header); cart → McKinley/Buffalo; store-locator → a Buffalo-area store-name list | spec headers |
-| Third-party URL shapes | Algolia `/1/indexes/<index>/queries` (index name deliberately un-pinned — wildcard regex, `search-autocomplete.spec.ts`); OpenTable loader URL; wegapi `kitting/…/menus`, `app-config/client/kv` | spec constants + headers |
-| Marketing copy / labels | "Meals & Recipes" nav label; "RESERVE YOUR TABLE" headings; the Amore menu-PDF filename convention (`a[href$=".pdf"][href*="Menu" i]`) | spec locators + comments |
-
-**The triage rule (entry-rot before backend-down).** When a monitor with a pinned entry
-goes red at its first gate — a 404, a redirect, or its entry network anchor never firing —
-suspect PIN-ROT first (the site restructured the slug/URL/id), and re-derive a live value
-from the site's own navigation BEFORE concluding the backend is down. A rotted pin reads
-identically to an outage but is a monitor defect, not an incident. This rule is stated in
-the failure messages themselves: `meals2go-catering-browse.spec.ts` (header, "★ ENTRY-SLUG
-RISK"), `meals2go-browse-menu.spec.ts`, `recipe-search.spec.ts`, and
-`shop-category-browse.spec.ts` (propagated in PR #43) — the red run's error text tells the
-responder where to re-derive the value.
-
-**Freshness lifecycle (when pins are verified).** Pins are verified at recon time — each
-spec header carries its dated ground truth (e.g. "recon 2026-06-30", "live recon
-2026-07-02", "Entry live-verified 2026-07-04") — then proven by the first verified-clean
-run before a monitor is enabled (`enabledByDefault: false`, see `CLAUDE.md`). There is
-**no scheduled re-verification**: a pin is revalidated when its monitor goes red, per the
-triage rule above. At the current fleet size that wait-for-red policy is deliberate; the
-dated header stamps are what make a stale pin auditable.
-
-**Cert-check cadence.** There is no explicit certificate-expiry check in this repo. TLS is
-exercised implicitly on every run: each monitor's `page.goto` fails on an invalid or
-expired certificate, so a cert problem on a target surfaces as that monitor going red at
-its own interval (`suggestedIntervalSeconds`, 600–1800 s across the fleet). Any
-expiry-lead-time alerting (warning *before* a cert lapses) would be a platform-side
-feature, not a spec in this repo.
+Monitors deliberately pin volatile, site-owned values (entry slugs, query terms, store
+context, third-party URL shapes) so deterministic entry beats racy UI nav. The full pin
+policy — the pin-class table, the **entry-rot-before-backend-down** triage rule, the
+freshness lifecycle, and the cert-check note — lives in
+**[`docs/runbooks/pin-and-entry-freshness.md`](docs/runbooks/pin-and-entry-freshness.md)**
+(moved out of the README to keep this file to onboarding). The authoritative copy is the
+spec headers + failure messages.
 
 ## Security model
 
