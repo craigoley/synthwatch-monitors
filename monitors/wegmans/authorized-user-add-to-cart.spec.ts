@@ -151,5 +151,6 @@ test.describe("Authorized User Add to Cart", () => {
         emptyListButton,
         'empty-list: "Empty My List" is still visible after confirming deletion — list may not have been cleared.',
       ).not.toBeVisible({ timeout: 30_000 });
+    });
   });
 });
