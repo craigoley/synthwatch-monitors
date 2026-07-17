@@ -208,7 +208,7 @@
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
       "tags": ["wegmans", "auth", "cart", "disabled"],
-      "description": "Authenticated add-to-cart flow: logs in via B2C (credential model-B), navigates directly to /shop/search results, adds a product to the cart, verifies /cart renders a line item, then empties the cart. sensitive=true: uses real account credentials."
+      "description": "Authenticated add-to-cart flow: logs in via B2C (credential model-B), navigates directly to /shop/search results, adds a product to the cart, verifies /cart renders a line item, then empties the cart. sensitive=true: uses real account credentials.",
       "target": "https://www.wegmans.com",
       "enabledByDefault": false,
       "sensitive": true,
