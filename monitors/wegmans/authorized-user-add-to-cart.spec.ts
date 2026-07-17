@@ -30,7 +30,12 @@ test.describe("Authorized User Add to Cart", () => {
     });
 
     await test.step("Sign in with credentials", async () => {
-      await page.locator('[class="tw:ml-2"]').first().click();
+      const signIn = page
+        .getByRole("link", { name: /sign ?in|log ?in/i })
+        .or(page.getByRole("button", { name: /sign ?in|log ?in/i }))
+        .filter({ visible: true })
+        .first();
+      await signIn.click();
 
       // Wait for the B2C login page to fully load
       await page.waitForURL(/myaccount\.wegmans\.com/, { timeout: 15_000 });
