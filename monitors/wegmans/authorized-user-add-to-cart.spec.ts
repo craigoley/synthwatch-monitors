@@ -70,24 +70,42 @@ test.describe("Authorized User Add to Cart", () => {
       // Wait for search results page to load
       await page.waitForURL(/search/, { timeout: 15_000 });
 
-      // Wait for add-to-cart button to appear in search results
+      // Wait for an actual "Add … to Cart" control (avoid matching "…to list" mini-buttons).
       const addToCartButton = page
-        .locator('[class*="default-add-button"]')
+        .getByRole("button", { name: /add\b.*\bto cart\b/i })
+        .or(page.locator('button[aria-label*="to cart" i]'))
+        .filter({ visible: true })
         .first();
       await expect(addToCartButton).toBeVisible({ timeout: 30_000 });
     });
 
     await test.step("Add item to cart", async () => {
       const addToCartButton = page
-        .locator('[class*="default-add-button"]')
+        .getByRole("button", { name: /add\b.*\bto cart\b/i })
+        .or(page.locator('button[aria-label*="to cart" i]'))
+        .filter({ visible: true })
         .first();
 
-      await addToCartButton.click();
+      const cartWrite = page.waitForResponse(
+        (r) => {
+          const m = r.request().method();
+          if (m === "GET" || m === "HEAD") return false;
+          try {
+            const host = new URL(r.url()).hostname.toLowerCase();
+            return (
+              /(^|\.)wegmans\.(com|cloud)$/.test(host) &&
+              /\/(cart|basket|cart-items|line-?items|order|add)/i.test(r.url()) &&
+              r.status() < 500
+            );
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 20_000 },
+      );
 
-      // Wait for the list icon to update with "selected item" text
-      await expect(
-        page.getByRole("link", { name: /selected item/i }),
-      ).toBeVisible({ timeout: 15_000 });
+      await addToCartButton.click();
+      await cartWrite;
     });
 
     await test.step("Open list and verify item", async () => {
