@@ -113,7 +113,7 @@ test.describe("Authorized User Add to Cart", () => {
             return (
               /(^|\.)wegmans\.(com|cloud)$/.test(host) &&
               /\/(cart|basket|cart-items|line-?items|order|add)/i.test(r.url()) &&
-              r.status() < 500
+              r.status() >= 200 && r.status() < 400
             );
           } catch {
             return false;
