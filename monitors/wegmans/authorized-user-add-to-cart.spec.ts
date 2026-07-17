@@ -1,49 +1,49 @@
-import { test, expect, credential, dismissInterstitials } from "../../lib/flow";
+import { test, expect, step, credential, dismissInterstitials } from '../../lib/flow';
 
-test("Authorized user add to cart and empty", async ({ page }) => {
+test('Authorized user add to cart and empty', async ({ page }) => {
   const bypassToken = process.env.VERCEL_BYPASS_TOKEN;
 
   // Host-scoped bypass header for B2C only (avoid leaking the token to 3p subresources).
   if (bypassToken) {
-    await page.route("https://myaccount.wegmans.com/**", async (route) => {
+    await page.route('https://myaccount.wegmans.com/**', async (route) => {
       const req = route.request();
       await route.continue({
-        headers: { ...req.headers(), "x-vercel-protection-bypass": bypassToken },
+        headers: { ...req.headers(), 'x-vercel-protection-bypass': bypassToken },
       });
     });
   }
 
   // Block monitoring endpoint to match TF config
-  await page.route("**/monitoring?*", (route) => route.abort());
+  await page.route('**/monitoring?*', (route) => route.abort());
 
   // credential() is FAIL-CLOSED: throws if SW_CRED_<ROLE> is unset/empty
-  const username = credential("username");
-  const password = credential("password");
+  const username = credential('username');
+  const password = credential('password');
 
-  await test.step("Navigate to the site", async () => {
-    await page.goto(process.env.BASE_URL ?? "https://www.wegmans.com");
+  await step('Navigate to the site', async () => {
+    await page.goto(process.env.BASE_URL ?? 'https://www.wegmans.com');
     await dismissInterstitials(page);
   });
 
-  await test.step("Sign in with credentials", async () => {
+  await step('Sign in with credentials', async () => {
     const signIn = page
-      .getByRole("link", { name: /sign ?in|log ?in/i })
-      .or(page.getByRole("button", { name: /sign ?in|log ?in/i }))
+      .getByRole('link', { name: /sign ?in|log ?in/i })
+      .or(page.getByRole('button', { name: /sign ?in|log ?in/i }))
       .filter({ visible: true })
       .first();
     await signIn.click();
 
     // Wait for the B2C login page to fully load
     await page.waitForURL(/myaccount\.wegmans\.com/, { timeout: 15_000 });
-    await page.waitForLoadState("domcontentloaded");
+    await page.waitForLoadState('domcontentloaded');
 
     // B2C form uses Azure AD B2C default ids
-    const usernameInput = page.locator("#signInName");
+    const usernameInput = page.locator('#signInName');
     await expect(usernameInput).toBeVisible({ timeout: 15_000 });
     await usernameInput.click();
     await usernameInput.type(username, { delay: 50 });
 
-    const passwordInput = page.locator("#password");
+    const passwordInput = page.locator('#password');
     await expect(passwordInput).toBeVisible({ timeout: 15_000 });
     await passwordInput.click();
     await passwordInput.type(password, { delay: 50 });
@@ -62,39 +62,38 @@ test("Authorized user add to cart and empty", async ({ page }) => {
       )
       .catch(() => null);
 
-    await page.locator("#next").click();
+    await page.locator('#next').click();
 
     expect(
       await tokenEvent,
-      "login: no B2C token-acquisition event within 45s of submit — auth did not complete",
+      'login: no B2C token-acquisition event within 45s of submit — auth did not complete',
     ).not.toBeNull();
 
     // Wait for redirect back to main site and greeting to appear (60s ceiling — free unless hit)
     await expect(
-      page.getByRole("link", { name: /account|hello|welcome|my wegmans|sign ?out/i })
-        .or(page.getByRole("button", { name: /account|hello|welcome|my wegmans|sign ?out/i }))
+      page.getByRole('link', { name: /account|hello|welcome|my wegmans|sign ?out/i })
+        .or(page.getByRole('button', { name: /account|hello|welcome|my wegmans|sign ?out/i }))
         .first(),
     ).toBeVisible({ timeout: 60_000 });
   });
 
-  await test.step("Search for product", async () => {
-    const query = "35 pack water";
+  await step('Search for product', async () => {
+    const query = '35 pack water';
     await page.goto(
-      `${process.env.BASE_URL ?? "https://www.wegmans.com"}/shop/search?query=${encodeURIComponent(query)}`,
-      { waitUntil: "domcontentloaded" },
+      `${process.env.BASE_URL ?? 'https://www.wegmans.com'}/shop/search?query=${encodeURIComponent(query)}`,
+      { waitUntil: 'domcontentloaded' },
     );
-    // Wait for an actual "Add … to Cart" control (avoid matching "…to list" mini-buttons).
     const addToCartButton = page
-      .getByRole("button", { name: /add\b.*\bto cart\b/i })
+      .getByRole('button', { name: /add\b.*\bto cart\b/i })
       .or(page.locator('button[aria-label*="to cart" i]'))
       .filter({ visible: true })
       .first();
     await expect(addToCartButton).toBeVisible({ timeout: 30_000 });
   });
 
-  await test.step("Add item to cart", async () => {
+  await step('Add item to cart', async () => {
     const addToCartButton = page
-      .getByRole("button", { name: /add\b.*\bto cart\b/i })
+      .getByRole('button', { name: /add\b.*\bto cart\b/i })
       .or(page.locator('button[aria-label*="to cart" i]'))
       .filter({ visible: true })
       .first();
@@ -102,7 +101,7 @@ test("Authorized user add to cart and empty", async ({ page }) => {
     const cartWrite = page.waitForResponse(
       (r) => {
         const m = r.request().method();
-        if (m === "GET" || m === "HEAD") return false;
+        if (m === 'GET' || m === 'HEAD') return false;
         try {
           const host = new URL(r.url()).hostname.toLowerCase();
           const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
@@ -118,23 +117,23 @@ test("Authorized user add to cart and empty", async ({ page }) => {
     await cartWrite;
   });
 
-  await test.step("Open cart and verify item", async () => {
-    await page.goto((process.env.BASE_URL ?? "https://www.wegmans.com") + "/cart", {
-      waitUntil: "domcontentloaded",
+  await step('Open cart and verify item', async () => {
+    await page.goto((process.env.BASE_URL ?? 'https://www.wegmans.com') + '/cart', {
+      waitUntil: 'domcontentloaded',
     });
 
     // "My Cart is empty" must NOT appear — its absence proves we have items
     await expect(
       page.getByText(/my cart is empty/i),
-      "cart: page shows 'My Cart is empty' after add-to-cart — item was not added",
+      'cart: page shows "My Cart is empty" after add-to-cart — item was not added',
     ).not.toBeVisible({ timeout: 30_000 });
   });
 
-  await test.step("Empty the cart", async () => {
+  await step('Empty the cart', async () => {
     // "Empty My Cart" appears as a toolbar action on /cart — may be link, button, or clickable text
     const emptyCart = page
-      .getByRole("link", { name: /empty my cart/i })
-      .or(page.getByRole("button", { name: /empty my cart/i }))
+      .getByRole('link', { name: /empty my cart/i })
+      .or(page.getByRole('button', { name: /empty my cart/i }))
       .or(page.getByText(/empty my cart/i))
       .filter({ visible: true })
       .first();
@@ -143,14 +142,13 @@ test("Authorized user add to cart and empty", async ({ page }) => {
 
     // The site may show a confirm dialog OR empty immediately — handle both
     const confirmButton = page
-      .getByRole("button", { name: /yes,?\s*delete items|confirm/i })
+      .getByRole('button', { name: /yes,?\s*delete items|confirm/i })
       .filter({ visible: true })
       .first();
     const emptyState = page.getByText(/my cart is empty/i);
 
-    // Race: confirm dialog vs already-empty
     const confirmAppeared = await confirmButton
-      .waitFor({ state: "visible", timeout: 5_000 })
+      .waitFor({ state: 'visible', timeout: 5_000 })
       .then(() => true)
       .catch(() => false);
 
