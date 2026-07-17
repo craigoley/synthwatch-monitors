@@ -2,12 +2,17 @@ import { test, expect, credential } from "../../lib/flow";
 
 test.describe("Authorized User Add to Cart", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setExtraHTTPHeaders({
-      "x-vercel-protection-bypass":
-        process.env.VERCEL_PROTECTION_BYPASS ?? "",
-      "x-vercel-set-bypass-cookie": "true",
-      cf1: process.env.CF1 ?? "",
-    });
+    const bypassToken = process.env.VERCEL_BYPASS_TOKEN;
+
+    // Host-scoped bypass header for B2C only (avoid leaking the token to 3p subresources).
+    if (bypassToken) {
+      await page.route("https://myaccount.wegmans.com/**", async (route) => {
+        const req = route.request();
+        await route.continue({
+          headers: { ...req.headers(), "x-vercel-protection-bypass": bypassToken },
+        });
+      });
+    }
 
     // Block monitoring endpoint to match TF config
     await page.route("**/monitoring?*", (route) => route.abort());
