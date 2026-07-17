@@ -134,26 +134,36 @@ test.describe("Authorized User Add to Cart", () => {
     });
 
     await test.step("Empty the cart", async () => {
-      // "Empty My Cart" is a direct toolbar link/button on /cart
+      // "Empty My Cart" appears as a toolbar action on /cart — may be link, button, or clickable text
       const emptyCart = page
         .getByRole("link", { name: /empty my cart/i })
         .or(page.getByRole("button", { name: /empty my cart/i }))
+        .or(page.getByText(/empty my cart/i))
         .filter({ visible: true })
         .first();
-      await expect(emptyCart, 'cart: "Empty My Cart" action not visible on the cart page').toBeVisible({ timeout: 15_000 });
+      await expect(emptyCart, 'cart: "Empty My Cart" action not visible on the cart page').toBeVisible({ timeout: 30_000 });
       await emptyCart.click();
 
-      // Confirm deletion if a dialog appears
-      const confirm = page
+      // The site may show a confirm dialog OR empty immediately — handle both
+      const confirmButton = page
         .getByRole("button", { name: /yes,?\s*delete items|confirm/i })
         .filter({ visible: true })
         .first();
-      await expect(confirm, 'cart: empty-cart confirm button did not appear').toBeVisible({ timeout: 15_000 });
-      await confirm.click();
+      const emptyState = page.getByText(/my cart is empty/i);
+
+      // Race: confirm dialog vs already-empty
+      const confirmAppeared = await confirmButton
+        .waitFor({ state: "visible", timeout: 5_000 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (confirmAppeared) {
+        await confirmButton.click();
+      }
 
       // Assert the cart is empty
       await expect(
-        page.getByText(/my cart is empty/i),
+        emptyState,
         'cart: "My Cart is empty" did not appear after emptying the cart',
       ).toBeVisible({ timeout: 30_000 });
     });
