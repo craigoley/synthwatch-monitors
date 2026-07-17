@@ -138,23 +138,35 @@ test.describe("Authorized User Add to Cart", () => {
       ).toBeVisible({ timeout: 30_000 });
     });
 
-    await test.step("Empty the list", async () => {
-      // Wait for "Empty My List" button to be available (means items have loaded)
-      const emptyListButton = page.getByRole("button", {
-        name: /empty my list/i,
-      });
-      await expect(emptyListButton).toBeVisible({ timeout: 30_000 });
-      await emptyListButton.click();
+    await test.step("Empty the cart", async () => {
+      const meatball = page
+        .getByRole("button", { name: /more options|more actions|cart actions|cart options|^more$|^options$|^actions$|^menu$/i })
+        .or(page.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').filter({ visible: true }))
+        .filter({ visible: true })
+        .first();
+      await expect(meatball, 'cart: could not find the cart actions (⋮) button to empty the cart').toBeVisible({ timeout: 30_000 });
+      await meatball.click();
 
-      // Confirm deletion
-      const confirmButton = page.getByRole("button", { name: "Confirm" });
-      await expect(confirmButton).toBeVisible({ timeout: 15_000 });
-      await confirmButton.click();
+      const emptyCart = page
+        .getByRole("menuitem", { name: /empty (my )?cart/i })
+        .or(page.getByRole("button", { name: /empty (my )?cart/i }))
+        .filter({ visible: true })
+        .first();
+      await expect(emptyCart, 'cart: "Empty My Cart" action did not become visible after opening the cart menu').toBeVisible({ timeout: 15_000 });
+      await emptyCart.click();
 
-      await expect(
-        emptyListButton,
-        'empty-list: "Empty My List" is still visible after confirming deletion — list may not have been cleared.',
-      ).not.toBeVisible({ timeout: 30_000 });
+      const confirm = page
+        .getByRole("button", { name: /yes,?\s*delete items/i })
+        .or(page.getByRole("button", { name: /confirm/i }))
+        .filter({ visible: true })
+        .first();
+      await expect(confirm, 'cart: empty-cart confirm button did not appear').toBeVisible({ timeout: 15_000 });
+      await confirm.click();
+
+      const lineItems = page
+        .locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]')
+        .filter({ visible: true });
+      await expect(lineItems.first(), 'cart: a cart line item is still visible after emptying the cart').not.toBeVisible({ timeout: 30_000 });
     });
   });
 });
