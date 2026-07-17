@@ -124,12 +124,18 @@ test.describe("Authorized User Add to Cart", () => {
       await cartWrite;
     });
 
-    await test.step("Open list and verify item", async () => {
-      // Navigate directly to the list page to ensure a fresh data fetch
-      await page.goto(
-        (process.env.BASE_URL ?? "https://www.wegmans.com") + "/my-list",
-      );
-      await page.waitForLoadState("domcontentloaded");
+    await test.step("Open cart and verify item", async () => {
+      await page.goto((process.env.BASE_URL ?? "https://www.wegmans.com") + "/cart", {
+        waitUntil: "domcontentloaded",
+      });
+
+      const lineItems = page
+        .locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]')
+        .filter({ visible: true });
+      await expect(
+        lineItems.first(),
+        "cart: no visible cart line items rendered on /cart after add-to-cart",
+      ).toBeVisible({ timeout: 30_000 });
     });
 
     await test.step("Empty the list", async () => {
