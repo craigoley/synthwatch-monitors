@@ -202,6 +202,25 @@
       ]
     },
     {
+      "id": "wegmans-authorized-user-add-to-cart",
+      "name": "Wegmans Authorized User Add to Cart",
+      "script": "monitors/wegmans/authorized-user-add-to-cart.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "cart", "shopping-list", "disabled"],
+      "description": "Authenticated add-to-cart flow: logs in via B2C (credential model-B), searches for a product, adds it to the shopping list, verifies the list page, then empties the list. sensitive=true: uses real account credentials.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "Bearer\\s+[A-Za-z0-9._~+/-]+=*",
+        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+",
+        "(x-ms-cpim-[A-Za-z0-9._-]+|AADB2C[A-Za-z0-9._-]*|csrf(_token)?=[^&\\s;]+)",
+        "(password|signInName)=[^&\\s]+"
+      ]
+    },
+    {
       "id": "wegmans-search-product-preview",
       "name": "Wegmans commerce PREVIEW: search → product (pre-prod regression)",
       "script": "monitors/wegmans/search-product.spec.ts",
