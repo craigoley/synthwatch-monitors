@@ -24,9 +24,8 @@ test.describe("Authorized User Add to Cart", () => {
     const password = credential("password");
 
     await test.step("Navigate to the site", async () => {
-      await page.goto(
-        process.env.BASE_URL ?? "https://www.wegmans.com",
-      );
+      await page.goto(process.env.BASE_URL ?? "https://www.wegmans.com");
+      await dismissInterstitials(page);
     });
 
     await test.step("Sign in with credentials", async () => {
