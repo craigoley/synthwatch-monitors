@@ -150,6 +150,6 @@ test.describe("Authorized User Add to Cart", () => {
       await expect(
         emptyListButton,
         'empty-list: "Empty My List" is still visible after confirming deletion — list may not have been cleared.',
-      ).toBeHidden({ timeout: 30_000 });
+      ).not.toBeVisible({ timeout: 30_000 });
   });
 });
