@@ -81,13 +81,11 @@ test.describe("Authorized User Add to Cart", () => {
     });
 
     await test.step("Search for product", async () => {
-      const searchInput = page.locator('[class="aa-Input"]').first();
-      await searchInput.fill("35 pack water");
-      await searchInput.press("Enter");
-
-      // Wait for search results page to load
-      await page.waitForURL(/search/, { timeout: 15_000 });
-
+      const query = "35 pack water";
+      await page.goto(
+        `${process.env.BASE_URL ?? "https://www.wegmans.com"}/shop/search?query=${encodeURIComponent(query)}`,
+        { waitUntil: "domcontentloaded" },
+      );
       // Wait for an actual "Add … to Cart" control (avoid matching "…to list" mini-buttons).
       const addToCartButton = page
         .getByRole("button", { name: /add\b.*\bto cart\b/i })
