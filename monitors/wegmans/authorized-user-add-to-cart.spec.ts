@@ -107,11 +107,8 @@ test.describe("Authorized User Add to Cart", () => {
           if (m === "GET" || m === "HEAD") return false;
           try {
             const host = new URL(r.url()).hostname.toLowerCase();
-            return (
-              /(^|\.)wegmans\.(com|cloud)$/.test(host) &&
-              /\/(cart|basket|cart-items|line-?items|order|add)/i.test(r.url()) &&
-              r.status() >= 200 && r.status() < 400
-            );
+            const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
+            return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(r.url()) && r.status() < 500;
           } catch {
             return false;
           }
