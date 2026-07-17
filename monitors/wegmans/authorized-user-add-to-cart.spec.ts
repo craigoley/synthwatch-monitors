@@ -1,4 +1,4 @@
-import { test, expect, credential } from "../../lib/flow";
+import { test, expect, credential, dismissInterstitials } from "../../lib/flow";
 
 test.describe("Authorized User Add to Cart", () => {
   test.beforeEach(async ({ page }) => {
