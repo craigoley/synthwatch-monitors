@@ -53,7 +53,20 @@ test.describe("Authorized User Add to Cart", () => {
       const pVal = await passwordInput.inputValue();
       expect(pVal.length).toBeGreaterThan(0);
 
+      // Arm a real auth-success signal BEFORE submit (avoid redirect race): B2C token-acquisition.
+      const tokenEvent = page
+        .waitForResponse(
+          (r) => /\/oauth2\/v2\.0\/token/i.test(r.url()) && r.status() >= 200 && r.status() < 400,
+          { timeout: 45_000 },
+        )
+        .catch(() => null);
+
       await page.locator("#next").click();
+
+      expect(
+        await tokenEvent,
+        "login: no B2C token-acquisition event within 45s of submit — auth did not complete",
+      ).not.toBeNull();
 
       // Wait for redirect back to main site and greeting to appear (60s ceiling — free unless hit)
       await expect(
