@@ -192,32 +192,89 @@ async function appearsWithin(loc: Loc, ms: number): Promise<boolean> {
     .catch(() => false);
 }
 
-/** Best-effort header cart-count badge read (CASE d: did the click increment the cart?). Tries the
- *  common badge shapes, then a cart link/button aria-label "N items". Returns the integer or null when
- *  no numeric badge is found. Structural only — reads a small count string, never account data. */
+/** A CART LINE-ITEM ROW, by EXACT class token — not a substring. CSS `.component--cart-item` matches an
+ *  element whose class LIST contains that token, so `component--cart-item-list`, `cart-item-count`,
+ *  `cart-item-content-wrapper` and `component--cart-item-quantity-selector` are all structurally excluded:
+ *  they are different tokens, not the row. That is why no `:not(…)` chain is needed here.
+ *
+ *  ★ Replaces `li[class*="item" i]`, which matched ANY nav <li> carrying the Tailwind class
+ *  `tw:items-center` — "items-center" contains "item". `<li class="list-element tw:py-1 tw:md:py-0
+ *  tw:flex tw:items-center">` appeared 288× in the 2026-07-30 failing trace, so every header/nav list
+ *  item counted as a cart row (the confidently-wrong count this PR removes).
+ *
+ *  ★ Fails in the SAFE direction: if Wegmans renames the row token this matches nothing, the count reads
+ *  0, and the caller's `≥4` assertion reds loudly. A substring selector fails the other way — it keeps
+ *  matching something and keeps reporting a number that means nothing.
+ *
+ *  ★ NOTE: cartResidual carries its own, deliberately LOOSER row expression (landed in #118). That is not
+ *  duplication to unify: there, a row count only ever reports NON-emptiness, so looseness costs extra
+ *  clearing work and can never manufacture a false "empty". Here the count feeds an assertion, so
+ *  precision is the requirement. Different jobs, different selectors — left as landed. */
+const CART_ROW_SEL = '.component--cart-item, [data-testid="cart-item"]';
+
+/** The cart control's own count, from its aria-label: "View 13 selected items in my Cart" — a word
+ *  ("selected") sits between the number and "items", so an optional intervening word is allowed. */
+const CART_ARIA_COUNT_RX = /(\d+)\s+(?:\w+\s+)?(?:items?|products?)/i;
+
+/** How long to wait for the cart control to be ATTACHED before reading its aria-label. Bounded; a miss
+ *  is not fatal, it just means the primary signal is unavailable and we fall to the last resort. */
+const CART_CTL_TIMEOUT_MS = 2_000;
+
+/** LAST-RESORT badge shapes, used only when the semantic aria-label is unavailable. Every arm excludes
+ *  `cart-item*` on BOTH the container and the counted element, because the old
+ *  `[class*="cart" i] [class*="count" i]` matched `cart-item-count` — the PER-ROW QUANTITY STEPPER —
+ *  nested inside `component--cart-item-list`. That is how a page could report a line item's quantity as
+ *  if it were the cart's item count. */
+const CART_BADGE_FALLBACK_SELECTORS = [
+  '[data-testid*="cart-count" i]:not([data-testid*="cart-item" i])',
+  '[data-testid*="cart" i]:not([data-testid*="cart-item" i]) [class*="count" i]:not([class*="cart-item" i])',
+  'a[href*="/cart" i] [class*="badge" i]:not([class*="cart-item" i]), a[href*="/cart" i] [class*="count" i]:not([class*="cart-item" i])',
+  '[class*="cart" i]:not([class*="cart-item" i]) [class*="badge" i]:not([class*="cart-item" i]), [class*="cart" i]:not([class*="cart-item" i]) [class*="count" i]:not([class*="cart-item" i])',
+];
+
+/**
+ * The cart's item count, or null when we could not obtain one. Structural only — reads a small count
+ * string, never account data.
+ *
+ * ★ PRECEDENCE INVERTED (2026-07-30). This used to try four loose class-substring selectors FIRST and
+ *   consult the aria-label LAST, so a match on `cart-item-count` (a per-row quantity stepper) pre-empted
+ *   the correct answer and was returned as the cart's count. Through the whole 2026-07-29/30 incident the
+ *   aria-label was RIGHT — it progressed 0→1→2→3→4 and never read the wrong value — while the count the
+ *   monitor asserted on was wrong for 34 consecutive runs. So the aria-label is now the PRIMARY signal:
+ *   it is semantic, explicitly numeric, and states what it counts. The class-substring shapes are the
+ *   last resort, and are scoped away from per-row controls.
+ *
+ * ★ NULL IS NOT ZERO. A caller must be able to tell "no count available" from "a real count of 0", so
+ *   the ONLY path that may report 0 is the primary semantic signal, which says 0 because the control
+ *   says 0. A 0 arriving from a LAST-RESORT selector is returned as null (UNKNOWN) — an unhydrated or
+ *   mis-targeted element reading `0` is precisely the confident lie this function used to tell. A
+ *   NON-ZERO fallback value is still returned: over-reporting is recoverable, under-reporting is what
+ *   let a dirty cart look clean (the same asymmetry cartResidual uses).
+ *
+ * ★ Every current caller already handles null: the ladder's three sites log `?? '?'`, verify-cart-4 does
+ *   `cartBadge ?? n`, cartResidual checks `!== null && > 0`, and clearCart's BADGE-HINT logs `?? '?'`.
+ *   Audited 2026-07-30 — no caller treats null as a number. Keep it that way.
+ */
 async function readCartCount(page: Page): Promise<number | null> {
-  const badgeSelectors = [
-    '[data-testid*="cart-count" i]',
-    '[data-testid*="cart" i] [class*="count" i]',
-    'a[href*="/cart" i] [class*="badge" i], a[href*="/cart" i] [class*="count" i]',
-    '[class*="cart" i] [class*="badge" i], [class*="cart" i] [class*="count" i]',
-  ];
-  for (const sel of badgeSelectors) {
+  // ── PRIMARY: the cart control's own aria-label ────────────────────────────────────────────────────
+  const cartCtl = page.getByRole('link', { name: /cart/i }).or(page.getByRole('button', { name: /cart/i })).first();
+  // Bounded wait so we do not read the attribute before the control exists. A timeout is not fatal.
+  await cartCtl.waitFor({ state: 'attached', timeout: CART_CTL_TIMEOUT_MS }).catch(() => {});
+  const al = await cartCtl.getAttribute('aria-label').catch(() => null);
+  const primary = al ? CART_ARIA_COUNT_RX.exec(al) : null;
+  if (primary) return parseInt(primary[1], 10); // the control's own number — 0 included, it means 0
+
+  // ── LAST RESORT: class-substring badge shapes, scoped away from per-row controls ──────────────────
+  for (const sel of CART_BADGE_FALLBACK_SELECTORS) {
     const loc = page.locator(sel).filter({ visible: true }).first();
     if (await loc.count().catch(() => 0)) {
       const t = (await loc.innerText({ timeout: 400 }).catch(() => '')).trim();
-      const m = t.match(/\d+/);
-      if (m) return parseInt(m[0], 10);
+      const m = /\d+/.exec(t);
+      if (m) {
+        const v = parseInt(m[0], 10);
+        return v > 0 ? v : null; // ★ a 0 from here is UNKNOWN, never "the cart is empty"
+      }
     }
-  }
-  const cartCtl = page.getByRole('link', { name: /cart/i }).or(page.getByRole('button', { name: /cart/i })).first();
-  const al = await cartCtl.getAttribute('aria-label').catch(() => null);
-  if (al) {
-    // ★ FALSE-NEGATIVE FIX: the real cart-link aria-label is "View 13 selected items in my Cart" — a word
-    // ("selected") sits between the number and "items", so the old /(\d+)\s*(item|product)/ never matched and
-    // returned null (cart=?). Allow an optional intervening word and plural item/product.
-    const m = al.match(/(\d+)\s+(?:\w+\s+)?(?:items?|products?)/i);
-    if (m) return parseInt(m[1], 10);
   }
   return null;
 }
@@ -1109,7 +1166,12 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       // cartBadge ?? n, ≤4). Anchored to the /cart cart-item components and visible-filtered, so nav/footer
       // "item" rows can't inflate it. (A cart-items API assertion — like meals2go-cheese-pizza-cart — would
       // be an even stronger secondary, but the badge is already the trusted count; not required.)
-      const lineItems = page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true });
+      // ★ 2026-07-30: was `[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]` —
+      // three substring arms that between them matched the cart-item-LIST container, the per-row quantity
+      // stepper, content wrappers, and every nav <li> carrying Tailwind `tw:items-center`. CART_ROW_SEL is
+      // an EXACT class-token match on the row. Only the locator changed here; the assertions below, their
+      // messages and the `cartBadge ?? n` fallback are untouched.
+      const lineItems = page.locator(CART_ROW_SEL).filter({ visible: true });
       await expect(lineItems.first(), 'verify-cart-4: no cart line items rendered on /cart — the cart painted zero items (an upstream add did not commit, or the cart failed to load).').toBeVisible({ timeout: STEP_TIMEOUT });
       const n = await countSafe(lineItems);
       expect(n, `verify-cart-4: expected ≥4 cart line items, saw ${n} (some adds may have failed — read per-step diags)`).toBeGreaterThanOrEqual(4);
