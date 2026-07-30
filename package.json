@@ -9,11 +9,13 @@
     "validate:manifest": "node scripts/validate-manifest.mjs",
     "check:matchers": "node scripts/check-matchers.mjs",
     "test:compile": "playwright test --list",
-    "check": "npm run validate:manifest && npm run check:matchers && npm run check:clear-cart-gate && npm run check:cart-count-gate && npm run typecheck && npm run test:compile",
+    "check": "npm run validate:manifest && npm run check:matchers && npm run check:clear-cart-gate && npm run check:cart-count-gate && npm run check:cart-identity-gate && npm run typecheck && npm run test:compile",
     "check:clear-cart-gate": "node scripts/check-clear-cart-gate.mjs",
     "redtest:clear-cart": "node scripts/redtest-baseline-clear-cart.mjs",
     "check:cart-count-gate": "node scripts/check-cart-count-gate.mjs",
-    "redtest:cart-count": "node scripts/redtest-cart-count-selectors.mjs"
+    "redtest:cart-count": "node scripts/redtest-cart-count-selectors.mjs",
+    "check:cart-identity-gate": "node scripts/check-cart-identity-gate.mjs",
+    "redtest:cart-identity": "node scripts/redtest-cart-identity.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",

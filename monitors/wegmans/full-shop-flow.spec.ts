@@ -396,6 +396,44 @@ function isCartWrite(method: string, url: string, status: number): boolean {
   return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(url) && status < 500;
 }
 
+/**
+ * The SKU set in a wegmans cart API response body, or null if this body is not a cart.
+ *
+ * ★ OBSERVED SHAPE (recon, runs 1093506 / 1096363): a `POST
+ *   api.digitaldevelopment.wegmans.cloud/commerce/cart/carts/lineitems` returns the WHOLE cart —
+ *   `{ StoreKey, customerID, customerEmail, cartData: [ { cartID, cartVersion, lineItems: [ { sku,
+ *   quantity, … } ] } ] }`. So the add mutation's own response is the server's record of cart contents,
+ *   exactly as meals2go-cheese-pizza-cart uses its cart-items POST response.
+ *
+ * ★ Keyed on the BODY, not on a URL pattern: any cart-write response that parses to cartData[].lineItems
+ *   is a cart, so an APIM path change cannot silently stop this working. Returns null (not []) when the
+ *   body is not a cart, so "not a cart response" stays distinguishable from "a cart with no items".
+ */
+function cartSkusFromBody(body: unknown): string[] | null {
+  if (!body || typeof body !== 'object') return null;
+  const cartData = (body as { cartData?: unknown }).cartData;
+  if (!Array.isArray(cartData) || cartData.length === 0) return null;
+  const lineItems = (cartData[0] as { lineItems?: unknown } | null)?.lineItems;
+  if (!Array.isArray(lineItems)) return null;
+  const skus: string[] = [];
+  for (const it of lineItems) {
+    const sku = it && typeof it === 'object' ? (it as { sku?: unknown }).sku : undefined;
+    if (typeof sku === 'string' && sku.length > 0) skus.push(sku);
+    else if (typeof sku === 'number' && Number.isFinite(sku)) skus.push(String(sku));
+  }
+  return skus;
+}
+
+/** The SKU a product-detail URL identifies: `/shop/product/92685-Bananas-Sold-by` → `"92685"`.
+ *  ★ Confirmed against the cart API in the recon: the PDP slug's leading number IS the cart lineItem
+ *  sku (55066 milk / 46155 eggs / 60715 bread / 92685 bananas). This is how a run learns what it added
+ *  WITHOUT a hardcoded SKU list — a catalog change moves the monitor's expectation with it instead of
+ *  manufacturing a failure. */
+function skuFromProductUrl(url: string): string | null {
+  const m = /\/shop\/product\/(\d+)/.exec(url);
+  return m ? m[1] : null;
+}
+
 /** ★ FULFILLMENT-CONTEXT WRITE — a first-party set-store / commit-fulfillment network WRITE (non-GET to a
  *  wegmans.com store/fulfillment/pickup/context/session endpoint). This is the signal the session BOUND the
  *  pickup-at-McKinley choice server-side. Trace 927288 showed the session only GETs store data
@@ -1001,6 +1039,41 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     abortIfOverCap();
     await clearCart(page, 'baseline-clear-cart');
 
+    // ── ★ IDENTITY LEDGER (verify-cart-4's evidence) ────────────────────────────────────────────────
+    // What this run ACTUALLY added, and what the SERVER says the cart holds — the two sides verify-cart-4
+    // compares. Nothing here is hardcoded: the expectation comes from the PDP each add committed on, so a
+    // catalog change moves it rather than faking a failure.
+    //
+    // Installed AFTER baseline-clear-cart so the clear's own cart response (an empty cart) cannot be
+    // mistaken for the post-add state, and removed after verify-cart-4 so the teardown clear cannot
+    // overwrite the evidence the assertion already used.
+    const expectedAdds: { item: string; sku: string | null }[] = [];
+    let serverCartSkus: string[] | null = null; // latest cart the server returned
+    let cartWriteSeen = false; // did ANY cart write fire? distinguishes "no request" from "no cart body"
+    const pendingCartBodies: Promise<void>[] = [];
+    const onCartBody = (resp: { request: () => { method: () => string }; url: () => string; status: () => number; json: () => Promise<unknown> }) => {
+      try {
+        if (!isCartWrite(resp.request().method(), resp.url(), resp.status())) return;
+        cartWriteSeen = true;
+        // Parse PROMPTLY: a Playwright response body can become unavailable once the page navigates, and
+        // this flow navigates between adds. The promise is collected so verify-cart-4 can await it rather
+        // than race it. Body failures are swallowed — telemetry must never break the flow; a missing body
+        // surfaces as the explicit "no cart body" failure in verify-cart-4, not as a crash here.
+        pendingCartBodies.push(
+          resp
+            .json()
+            .then((b) => {
+              const skus = cartSkusFromBody(b);
+              if (skus) serverCartSkus = skus;
+            })
+            .catch(() => {}),
+        );
+      } catch {
+        /* telemetry never breaks the flow */
+      }
+    };
+    page.on('response', onCartBody);
+
     // ---- STEP(s): search + add each item (search-select + DOM-verified add-to-cart buy-box ladder) ----
     for (const item of SHOPPING_ITEMS) {
       abortIfOverCap();
@@ -1058,6 +1131,13 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           `add-${item}: did not reach a product detail page (/shop/product/…) — the search tile click did not ` +
             `navigate and the direct product-URL fallback failed; the add must run on the PDP, never the search "+".`,
         ).toHaveURL(/\/shop\/product\//, { timeout: STEP_TIMEOUT });
+
+        // ★ RECORD WHAT THIS STEP IS ADDING. The PDP url is already hard-asserted above, so its slug is
+        // the most reliable in-run statement of identity available. Deliberately NOT an assertion here: a
+        // slug without a leading number must not red an add step that otherwise worked. It is recorded as
+        // null and verify-cart-4 fails explicitly on an incomplete ledger — fail-closed, but in the step
+        // that owns the claim.
+        expectedAdds.push({ item, sku: skuFromProductUrl(page.url()) });
 
         // ★ BANANAS VERIFY: confirm the landed PDP is the ACTUAL banana (id 92685 or a name that STARTS
         // with "Bananas") BEFORE the add commits — rejects a cherries/flavored hijack that slipped through.
@@ -1155,37 +1235,116 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       });
     }
 
-    // ---- STEP: verify all 4 in cart ----------------------------------------------------------------
+    // ---- STEP: verify the cart holds exactly what this run added, BY IDENTITY ----------------------
+    //
+    // ★ WAS A NODE COUNT (`≥4` on a DOM row count, then `≤4` on `cartBadge ?? n`). Two problems, both
+    //   measured on 2026-07-30 across 34 consecutive failures:
+    //     • IDENTITY-BLIND. It counted to 4 and never read an item, so a leftover could SATISFY the
+    //       threshold and a boosted-merchandise hijack (the July-4th "Red, White & Blue" loaf, Easter
+    //       chocolate eggs) could pass with the WRONG product in the cart. The add steps above already
+    //       say so twice: "verify-cart-4 COUNTS items, not identity → a false green."
+    //     • The number was wrong anyway. The cart genuinely held the 4 correct SKUs while the assertion
+    //       read 5 — the count came from loose DOM/badge selectors, not from the cart.
+    //
+    // ★ NOW: identity off the cart API, following meals2go-cheese-pizza-cart (wait for the cart response,
+    //   assert its status, then assert its contents). A nav <li> has no SKU, so it can never be
+    //   miscounted; a leftover is named rather than inferred from a threshold.
+    //
+    // ★ The expectation is what this run ADDED (PDP slugs recorded per add step), never a hardcoded SKU
+    //   list — a catalog change moves the expectation with it instead of manufacturing a failure.
     abortIfOverCap();
     await runStep(page, 'verify-cart-4', async () => {
       await page.goto(CART_URL, { waitUntil: 'domcontentloaded' });
       await dismissInterstitials(page);
-      // VERIFIED (by passing runs): this DOM line-item count has matched exactly the 4 added items across
-      // 30+ green verify-cart-4 runs, AGREEING with the server-truth badge below (both resolve to 4). It is
-      // the SECONDARY signal; the LOAD-BEARING assertion is the server-truth cart badge (cartCount =
-      // cartBadge ?? n, ≤4). Anchored to the /cart cart-item components and visible-filtered, so nav/footer
-      // "item" rows can't inflate it. (A cart-items API assertion — like meals2go-cheese-pizza-cart — would
-      // be an even stronger secondary, but the badge is already the trusted count; not required.)
-      // ★ 2026-07-30: was `[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]` —
-      // three substring arms that between them matched the cart-item-LIST container, the per-row quantity
-      // stepper, content wrappers, and every nav <li> carrying Tailwind `tw:items-center`. CART_ROW_SEL is
-      // an EXACT class-token match on the row. Only the locator changed here; the assertions below, their
-      // messages and the `cartBadge ?? n` fallback are untouched.
-      const lineItems = page.locator(CART_ROW_SEL).filter({ visible: true });
-      await expect(lineItems.first(), 'verify-cart-4: no cart line items rendered on /cart — the cart painted zero items (an upstream add did not commit, or the cart failed to load).').toBeVisible({ timeout: STEP_TIMEOUT });
-      const n = await countSafe(lineItems);
-      expect(n, `verify-cart-4: expected ≥4 cart line items, saw ${n} (some adds may have failed — read per-step diags)`).toBeGreaterThanOrEqual(4);
-      // ★ INVARIANT (Craig): the cart MUST be ≤ 4 here. >4 means baseline-clear-cart did NOT empty the
-      // previous session's leftover items (they accumulated) — the exact failure this PR fixes. Prefer the
-      // header BADGE (server truth) over the DOM line-item count (which can over-count sticky/duplicate rows);
-      // fall back to n only when the badge is absent. Fail LOUD rather than pass a cart polluted with residue.
-      const cartBadge = await readCartCount(page);
-      const cartCount = cartBadge ?? n;
+
+      // ── GATE 1: did the /cart APP RENDER? ──────────────────────────────────────────────────────────
+      // ★ Asserted FIRST and reported as itself. At the 2026-07-30 failures the diag read
+      //   {"cartPresent":false,"checkoutPresent":false,"counts":{"inputs":1}} — a page SHELL. Any count or
+      //   cart claim taken from that page is meaningless, so an unmounted cart must fail as a RENDER
+      //   failure and say nothing about cart contents.
+      const cartApp = page
+        .locator(CART_LIST_SEL)
+        .or(page.locator(CART_ROW_SEL))
+        .or(page.getByText(CART_EMPTY_RX))
+        .filter({ visible: true });
+      const mounted = await cartApp
+        .first()
+        .waitFor({ state: 'visible', timeout: STEP_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
       expect(
-        cartCount,
-        `verify-cart-4: cart has ${cartCount} item(s) (>4) — baseline clear-cart did not empty leftover items; clearing failed`,
-      ).toBeLessThanOrEqual(4);
+        mounted,
+        `verify-cart-4: the /cart app did not render within ${Math.round(STEP_TIMEOUT / 1000)}s — no cart ` +
+          `line-item list, no cart rows and no empty-cart copy appeared. MEASURED: the page served a shell. ` +
+          `This says nothing about what the cart contains; no count or contents assertion is meaningful here.`,
+      ).toBeTruthy();
+
+      // ── GATE 2: do we HAVE the server's cart for this run? ─────────────────────────────────────────
+      // Await the collected body parses rather than racing them. The two failure texts are distinct so a
+      // fire says which half broke, exactly as meals2go's GATE-E does.
+      await Promise.allSettled(pendingCartBodies);
+      const serverSkus: string[] | null = serverCartSkus;
+      expect(
+        serverSkus,
+        cartWriteSeen
+          ? `verify-cart-4: cart write(s) fired but none returned a parseable cart body ` +
+            `(cartData[].lineItems). MEASURED: no server cart state available for this run, so cart ` +
+            `contents were not verified. The API response shape may have changed.`
+          : `verify-cart-4: no cart write was observed during the add steps. MEASURED: no server cart ` +
+            `state available for this run, so cart contents were not verified.`,
+      ).toBeTruthy();
+
+      // ── GATE 3: the LEDGER must be complete before it can be trusted ───────────────────────────────
+      const unknown = expectedAdds.filter((a) => a.sku === null).map((a) => a.item);
+      expect(
+        unknown.length,
+        `verify-cart-4: could not determine the SKU this run added for: ${unknown.join(', ')} — the product ` +
+          `url carried no /shop/product/<sku> slug. MEASURED: the expectation is incomplete, so an identity ` +
+          `check would be weaker than it looks; failing rather than asserting less.`,
+      ).toBe(0);
+
+      // ── GATE 4: IDENTITY — the added SKUs are present, and the cart holds nothing else ─────────────
+      const expected = [...new Set(expectedAdds.map((a) => a.sku as string))];
+      const actual = [...new Set(serverSkus as string[])];
+      const label = (sku: string) => {
+        const hit = expectedAdds.find((a) => a.sku === sku);
+        return hit ? `${sku} (${hit.item})` : sku;
+      };
+      const missing = expected.filter((s) => !actual.includes(s));
+      const extra = actual.filter((s) => !expected.includes(s));
+      console.log(
+        `[full-shop-flow] CART-IDENTITY added=[${expected.join(',')}] server=[${actual.join(',')}] ` +
+          `missing=[${missing.join(',')}] extra=[${extra.join(',')}]`,
+      );
+
+      expect(
+        missing.length,
+        `verify-cart-4: the cart is MISSING ${missing.length} SKU(s) this run added: ` +
+          `${missing.map(label).join(', ')}. MEASURED from the cart API: server cart = ` +
+          `[${actual.join(', ')}] (${actual.length}); this run added [${expected.join(', ')}] ` +
+          `(${expected.length}). Read the per-add step diags for which add did not commit.`,
+      ).toBe(0);
+
+      expect(
+        extra.length,
+        `verify-cart-4: the cart holds ${extra.length} SKU(s) this run did NOT add: ` +
+          `${extra.join(', ')}. MEASURED from the cart API: server cart = [${actual.join(', ')}] ` +
+          `(${actual.length}); this run added [${expected.join(', ')}] (${expected.length}). This run did ` +
+          `not determine how they got there.`,
+      ).toBe(0);
+
+      // Set-size equality is implied by the two checks above; asserted explicitly so the invariant
+      // ("exactly what this run added") is stated rather than inferred by a reader.
+      expect(
+        actual.length,
+        `verify-cart-4: cart holds ${actual.length} distinct SKU(s), this run added ${expected.length}. ` +
+          `MEASURED from the cart API: server cart = [${actual.join(', ')}]; added = [${expected.join(', ')}].`,
+      ).toBe(expected.length);
     });
+
+    // The ledger has served its purpose — stop recording so the teardown clear (an empty cart) cannot
+    // overwrite the evidence the assertion above already used.
+    page.off('response', onCartBody);
 
     // ---- STEP: checkout as PICKUP ------------------------------------------------------------------
     abortIfOverCap();
