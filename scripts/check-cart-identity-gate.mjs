@@ -65,6 +65,25 @@ must(
   'the render gate must be asserted BEFORE any cart-contents claim (a count off a shell page means nothing)',
 );
 
+// 4b. ★ NO DEFERRED BODY READ MAY SURVIVE A NAVIGATION (the 2026-07-30 live red). The first cut read the
+//     cart body from a flow-scoped listener and awaited the parses at verify time — by then the page had
+//     navigated on every add and into /cart, the bodies were gone, and GATE 2 fired on a healthy cart.
+//     The read must live inside withCartBodyCapture, which is scoped to ONE add step and awaits its own
+//     parses before returning.
+must(/const withCartBodyCapture = async/.test(code), 'withCartBodyCapture is gone — the cart body read must be step-scoped');
+must(
+  /withCartBodyCapture\(\(\) => addToCartLadder/.test(code),
+  'the add ladder must run INSIDE withCartBodyCapture, or the body read is not scoped to the add step',
+);
+must(!/pendingCartBodies/.test(code), 'the flow-scoped deferred body-promise array is back — that was the live red');
+{
+  const w = code.slice(code.indexOf('const withCartBodyCapture'));
+  const wBody = w.slice(0, w.indexOf('\n    };') + 1);
+  must(/page\.on\('response'/.test(wBody), "the response listener must be INSIDE withCartBodyCapture, not at flow scope");
+  must(/page\.off\('response'/.test(wBody), 'the listener must be detached inside the wrapper (finally)');
+  must(/await Promise\.allSettled\(parses\)/.test(wBody), 'the body parses must be awaited INSIDE the wrapper');
+}
+
 // 5. The message contract: state what was measured, name no untested cause. These exact phrases are what
 //    sent the 2026-07-30 diagnosis to the wrong subsystem.
 for (const phrase of ['did not empty leftover items', 'clearing failed', 'they accumulated']) {
