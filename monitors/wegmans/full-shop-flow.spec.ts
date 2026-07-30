@@ -1287,27 +1287,89 @@ async function selectBananaResult(page: Page): Promise<Loc> {
   );
 }
 
-/** Best-effort residual cart count for clearCart's empty-verify. Prefers the header cart BADGE (server
- *  truth via readCartCount); if there's no numeric badge, treats a rendered empty-cart state ("your cart is
- *  empty" / "start shopping") as 0, else falls back to the count of VISIBLE cart line items. Returns -1 when
- *  the state is genuinely UNKNOWN (no badge, no empty-state, no line items) — the caller MUST NOT treat -1
- *  as empty. This is the fix for the old false-pass: a missing/unnumbered badge used to read as 0 and let a
- *  broken clear look successful. */
+/** The cart-app MOUNT anchors — the two DOM states that prove we are looking at a RENDERED cart page
+ *  rather than a page shell: the line-item list container, or the rendered empty-cart copy.
+ *  ★ Deliberately NARROWER than captureStepDiag's `[class*="cart" i], [data-testid*="cart" i]`, which is
+ *  an unscoped substring: it matches header cart chrome and any cart-named element, so its answer does
+ *  not distinguish "the cart app mounted" from "something cart-ish is on the page" — in EITHER
+ *  direction. (That diag probe is a forensic hint and stays as it is; it is not load-bearing. The
+ *  2026-07-30 recon read `cartPresent:false` on the failing /cart page — evidence the app had not
+ *  mounted, not evidence about this selector's precision.) */
+const CART_LIST_SEL = '[class*="cart-item-list" i], [data-testid*="cart-item-list" i]';
+const CART_EMPTY_RX = /your cart is empty|cart is empty|no items in your cart|start shopping|cart is currently empty/i;
+/** How long cartResidual waits for ONE of the mount proofs to render before reporting UNKNOWN. Sized to
+ *  the cart app's mount, not to a guess about hydration: the loop that calls this has already navigated
+ *  and dismissed interstitials, so anything slower than this is a genuinely unhealthy cart page. */
+const CART_PROOF_TIMEOUT_MS = 8_000;
+
+/** Residual cart count for clearCart's empty-verify. Returns -1 when the state is UNKNOWN — the caller
+ *  MUST NOT treat -1 as empty.
+ *
+ * ★ EMPTINESS REQUIRES A POSITIVE, MOUNTED-CART PROOF (2026-07-30). It used to be
+ *   `const badge = await readCartCount(page); if (badge !== null) return badge;` — so an unwaited badge
+ *   read of `0` was returned as a definitive count. readCartCount is a best-effort SYNCHRONOUS read
+ *   (400ms innerText timeout, no hydration wait) of a CLIENT-rendered badge populated from cart state
+ *   fetched after paint, so an early read can return the PRE-HYDRATION `0` on a cart that is not empty.
+ *   Trusting that `0` is what let a broken/skipped clear look successful.
+ *
+ *   Now: a `0` is only believed when the cart app has demonstrably MOUNTED and says so — either the
+ *   rendered empty-cart copy, or the line-item list container present with zero rows in it. A NON-ZERO
+ *   badge is still trusted immediately: over-reporting a dirty cart only costs extra clearing work,
+ *   whereas under-reporting is the failure this function exists to prevent. Asymmetric on purpose.
+ *
+ *   Two proofs rather than one so a copy change on either side cannot silently turn a genuinely-empty
+ *   cart into UNKNOWN (which would red the monitor on a clean cart — the opposite false alarm). */
 async function cartResidual(page: Page): Promise<number> {
-  const badge = await readCartCount(page); // header badge = server truth (or null when absent/unnumbered)
-  if (badge !== null) return badge;
-  const emptyState = await page
-    .getByText(/your cart is empty|cart is empty|no items in your cart|start shopping|cart is currently empty/i)
-    .filter({ visible: true })
+  // A NON-ZERO badge is safe to trust: it can only cause MORE clearing work, never a false "empty".
+  const badge = await readCartCount(page);
+  if (badge !== null && badge > 0) return badge;
+
+  // The line-item ROWS. ★ NOT `li[class*="item" i]`, which matches any nav <li> carrying the Tailwind
+  // class `tw:items-center` ("items-center" contains "item"). And the `-list` container is EXCLUDED
+  // because "cart-item-list" itself contains "cart-item" — the substring trap one level up.
+  // This count only ever reports NON-emptiness (see below), so residual looseness here can cost extra
+  // clearing work but can never manufacture a false "empty".
+  const rows = page
+    .locator(
+      '[class*="cart-item" i]:not([class*="cart-item-list" i]), [data-testid*="cart-item" i]:not([data-testid*="cart-item-list" i])',
+    )
+    .filter({ visible: true });
+  const emptyCopy = page.getByText(CART_EMPTY_RX).filter({ visible: true });
+  const list = page.locator(CART_LIST_SEL).filter({ visible: true });
+
+  // ★ ACTIVELY WAIT for one of the mount proofs to render, bounded — do not read once and guess. This is
+  // the real hydration wait: it waits on the SIGNALS THAT MEAN SOMETHING (empty copy / list container /
+  // a row) instead of on the clock, so it is sound where a fixed settle is not, and it uses the repo's
+  // `waitFor` idiom rather than the fleet-banned page.waitForTimeout. A timeout here is not fatal — it
+  // just means we fall through to the UNKNOWN return below, which the caller must not read as empty.
+  await emptyCopy
+    .or(list)
+    .or(rows)
     .first()
-    .isVisible({ timeout: 1000 })
-    .catch(() => false);
-  if (emptyState) return 0;
-  const lineItems = await countSafe(
-    page.locator('[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]').filter({ visible: true }),
-  );
-  if (lineItems > 0) return lineItems; // definitely non-empty
-  return -1; // UNKNOWN — no positive empty signal; never reported as empty
+    .waitFor({ state: 'visible', timeout: CART_PROOF_TIMEOUT_MS })
+    .catch(() => {});
+
+  // PROOF 1 — the rendered empty-cart copy. The site's own statement that there is nothing to clear.
+  if (await isVisibleSafe(emptyCopy.first())) return 0;
+
+  const rowCount = await countSafe(rows);
+  if (rowCount > 0) return rowCount; // definitely non-empty
+
+  // PROOF 2 — the list CONTAINER mounted with NO ELEMENT CHILDREN. Covers an empty-copy wording change:
+  // the cart app is provably mounted and rendering nothing. Deliberately does NOT consult the badge — a
+  // `0` from it is exactly the pre-hydration read that made this function untrustworthy.
+  //
+  // ★ Counts DOM children rather than "the row selector matched 0", on purpose. Keying emptiness off a
+  //   selector miss would hand us a NEW fail-open: rename the row class and a full cart reads as empty.
+  //   `children.length` cannot miss a row it does not have a selector for — so a full cart whose rows we
+  //   fail to recognise falls through to UNKNOWN below, which is the safe direction.
+  const listChildren = await list
+    .first()
+    .evaluate((el) => el.children.length)
+    .catch(() => null);
+  if (listChildren === 0) return 0;
+
+  return -1; // UNKNOWN — no positive mounted-cart proof of emptiness; never reported as empty
 }
 
 /** Best-effort dismiss the /cart cookie-consent banner ("Our website uses cookies… [Close]") that sits
@@ -1447,8 +1509,13 @@ async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 
  *  dropdown (Print / Share / Add to Saved Lists / Empty My Cart); "Empty My Cart" (trash icon) is a SINGLE
  *  bulk clear — one action, exactly how a user empties the cart. Flow: dismiss cookie banner → open ⋮
  *  ROBUSTLY → VERIFY the menu opened ("Empty My Cart" visible) → click "Empty My Cart" → confirm "Yes,
- *  delete items" → VERIFY the cart is DURABLY 0 (server truth via readCartCount / cartResidual). One retry,
+ *  delete items" → VERIFY the cart is DURABLY 0 via cartResidual, which demands a POSITIVE mounted-cart
+ *  proof of emptiness (never a bare header-badge `0` — that can be a pre-hydration render). One retry,
  *  then a loud STEP-FAIL with the residual count — NEVER a silent pass.
+ *
+ *  ★ 2026-07-30: this function is reached on EVERY call now, including the baseline. The old badge-only
+ *  short-circuit made baseline-clear-cart 359 pass / 0 fail — see the BADGE-HINT block below for why an
+ *  unwaited `0` is not evidence, and scripts/check-clear-cart-gate.mjs for the invariants CI holds.
  *
  *  ★ TRUE ROOT CAUSE (hands-on recon, live logged-in cart, 2026-07-10 — corrects the earlier trace-935321
  *  "React onClick doesn't fire" INFERENCE): the ⋮ menu was "0-for-3" because this function navigated to
@@ -1493,21 +1560,36 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         crumbs.push(await clearStep(page, label, sub, result, detail));
       };
 
-      // ── BADGE-FIRST SHORT-CIRCUIT (cost) ──────────────────────────────────────────────────────────
-      // Read the HEADER cart badge on the CURRENT page — NO /cart navigation. A definitive 0 means the cart
-      // is already empty (the common case: the 2026-07-12 recon found the baseline cart already-empty 0/22;
-      // the end-of-flow teardown does the real emptying), so skip the ~9s /cart nav + cart-app-mount +
-      // residual probe entirely. ONLY a hard 0 short-circuits; a null badge (unreadable / no numeric badge)
-      // or >0 falls through to the full nav+clear loop below, which re-verifies server-truth. The
-      // mid-flow-crash guard is INTACT: a dirty cart (badge>0, or an unreadable badge) still runs the full
-      // durable clear + verifies the badge reaches 0.
+      // ── ★ BADGE-HINT (was: BADGE-FIRST SHORT-CIRCUIT) ─────────────────────────────────────────────
+      // This used to SHORT-CIRCUIT the whole step: read the header cart badge on the CURRENT page and, on a
+      // hard `0`, log `SUMMARY OK badge-empty` and return — no /cart navigation, no clear, no verification.
+      //
+      // ★ THAT MADE THE STEP UNABLE TO FAIL. Over the 7 days to 2026-07-30, baseline-clear-cart was
+      //   359 pass / 0 fail — it has NEVER failed — averaging 966ms against the teardown's 52s, because it
+      //   almost always took this path and asserted nothing. readCartCount is a best-effort SYNCHRONOUS
+      //   read (400ms innerText timeout, NO hydration wait) of a CLIENT-rendered badge populated from cart
+      //   state fetched after paint. Read on an arbitrary page (here: straight after select-store), a `0`
+      //   can be the PRE-HYDRATION initial render of a cart that is not empty. A step that cannot fail
+      //   protects nothing, and this was the last way cart residue could survive silently into a run.
+      //
+      // ★ WHY NOT "just wait for the badge to hydrate": there is no trustworthy hydration signal HERE.
+      //   A fixed settle is banned fleet-wide (page.waitForTimeout — see b2c-login-test.spec.ts) and would
+      //   be unsound anyway: polling a value that reads `0` both before and after hydration cannot tell the
+      //   two apart, so a slow hydration still yields a confident wrong answer. The signals that CAN prove
+      //   emptiness (the rendered empty-cart copy; the mounted line-item list) only exist ON /cart — which
+      //   is exactly where the loop below already goes, and where it already has a verified already-empty
+      //   fast exit (INITIAL-COUNT → `before === 0` → SUMMARY OK already-empty, skipping the ceremony).
+      //
+      // So the badge is now a logged HINT and never a decision: we ALWAYS fall through to the verified
+      // nav+clear loop. Cost is one /cart navigation (~9s) on a 600s run cap; in exchange the step can
+      // fail, and "empty" is always something we proved rather than something we assumed. A non-zero hint
+      // is still worth recording — it tells the breadcrumb reader the cart was dirty before we navigated.
       const headerBadge = await readCartCount(page).catch(() => null);
-      if (headerBadge === 0) {
-        initialCount = 0;
-        failedAt = 'none';
-        await crumb('SUMMARY', 'OK', `badge-empty initial=0 final=0 (header badge=0, skipped /cart nav)`);
-        return;
-      }
+      await crumb(
+        'BADGE-HINT',
+        'SKIP',
+        `header badge=${headerBadge ?? '?'} (hint only — NOT proof of emptiness; verifying on /cart)`,
+      );
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const tag = `attempt=${attempt + 1}`;
@@ -1640,7 +1722,9 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           }
         }
 
-        // ── SUB-STEP 10: FINAL-COUNT / VERIFY — FRESH nav + cart BADGE (server truth), not optimistic DOM. ──
+        // ── SUB-STEP 10: FINAL-COUNT / VERIFY — FRESH nav + cartResidual, which requires a POSITIVE
+        //    mounted-cart proof of emptiness (rendered empty copy, or the list container with no children).
+        //    NOT the header badge on its own: a `0` from that can be a pre-hydration render. ────────────
         failedAt = 'FINAL-COUNT';
         await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
