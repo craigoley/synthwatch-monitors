@@ -198,7 +198,17 @@
         "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
         "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+",
         "(x-ms-cpim-[A-Za-z0-9._-]+|AADB2C[A-Za-z0-9._-]*|csrf(_token)?=[^&\\s;]+)",
-        "(password|signInName)=[^&\\s]+"
+        "(password|signInName)=[^&\\s]+",
+        "\"userInfo\"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+        "\"user\"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+        "\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|shopperCardNumber)\"\\s*:\\s*\"?\\d+\"?",
+        "\"(phoneNumber|phone_number|mobileNumber|mobile_number)\"\\s*:\\s*\"[^\"]*\"",
+        "\"(firstName|first_name|lastName|last_name|middleName|middle_name|fullName|full_name)\"\\s*:\\s*\"[^\"]*\"",
+        "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+        "\"(customerId|customerID|customer_id|customerKey|customer_key|userId|user_id|shopperId|shopper_id|CUID|ECID)\"\\s*:\\s*\"[^\"]*\"",
+        "/users/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        "wgcl_[0-9a-fA-F-]{36}",
+        "\"name\"\\s*:\\s*\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|phoneNumber|phone_number|firstName|first_name|lastName|last_name|email|CUID|ECID)\"\\s*,\\s*\"value\"\\s*:\\s*\"[^\"]*\""
       ]
     },
     {
@@ -217,7 +227,17 @@
         "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
         "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+",
         "(x-ms-cpim-[A-Za-z0-9._-]+|AADB2C[A-Za-z0-9._-]*|csrf(_token)?=[^&\\s;]+)",
-        "(password|signInName)=[^&\\s]+"
+        "(password|signInName)=[^&\\s]+",
+        "\"userInfo\"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+        "\"user\"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+        "\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|shopperCardNumber)\"\\s*:\\s*\"?\\d+\"?",
+        "\"(phoneNumber|phone_number|mobileNumber|mobile_number)\"\\s*:\\s*\"[^\"]*\"",
+        "\"(firstName|first_name|lastName|last_name|middleName|middle_name|fullName|full_name)\"\\s*:\\s*\"[^\"]*\"",
+        "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+        "\"(customerId|customerID|customer_id|customerKey|customer_key|userId|user_id|shopperId|shopper_id|CUID|ECID)\"\\s*:\\s*\"[^\"]*\"",
+        "/users/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        "wgcl_[0-9a-fA-F-]{36}",
+        "\"name\"\\s*:\\s*\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|phoneNumber|phone_number|firstName|first_name|lastName|last_name|email|CUID|ECID)\"\\s*,\\s*\"value\"\\s*:\\s*\"[^\"]*\""
       ]
     },
     {
@@ -250,7 +270,17 @@
         "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
         "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+",
         "(x-ms-cpim-[A-Za-z0-9._-]+|AADB2C[A-Za-z0-9._-]*|csrf(_token)?=[^&\\s;]+)",
-        "(password|signInName)=[^&\\s]+"
+        "(password|signInName)=[^&\\s]+",
+        "\"userInfo\"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+        "\"user\"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}",
+        "\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|shopperCardNumber)\"\\s*:\\s*\"?\\d+\"?",
+        "\"(phoneNumber|phone_number|mobileNumber|mobile_number)\"\\s*:\\s*\"[^\"]*\"",
+        "\"(firstName|first_name|lastName|last_name|middleName|middle_name|fullName|full_name)\"\\s*:\\s*\"[^\"]*\"",
+        "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+        "\"(customerId|customerID|customer_id|customerKey|customer_key|userId|user_id|shopperId|shopper_id|CUID|ECID)\"\\s*:\\s*\"[^\"]*\"",
+        "/users/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        "wgcl_[0-9a-fA-F-]{36}",
+        "\"name\"\\s*:\\s*\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|phoneNumber|phone_number|firstName|first_name|lastName|last_name|email|CUID|ECID)\"\\s*,\\s*\"value\"\\s*:\\s*\"[^\"]*\""
       ]
     }
   ]
