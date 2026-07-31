@@ -18,7 +18,8 @@
     "redtest:cart-identity": "node scripts/redtest-cart-identity.mjs",
     "redtest:cart-body": "node scripts/redtest-cart-body-read.mjs",
     "check:ci-wiring": "node scripts/check-ci-wiring.mjs",
-    "redtest": "npm run redtest:clear-cart && npm run redtest:cart-count && npm run redtest:cart-identity && npm run redtest:cart-body"
+    "redtest": "npm run redtest:clear-cart && npm run redtest:cart-count && npm run redtest:cart-identity && npm run redtest:cart-body && npm run redtest:cart-aborted",
+    "redtest:cart-aborted": "node scripts/redtest-cart-aborted-write.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",

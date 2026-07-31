@@ -397,6 +397,29 @@ function isCartWrite(method: string, url: string, status: number): boolean {
 }
 
 /**
+ * A wegmans cart READ — a completed `GET …/commerce/cart/carts…` (2xx).
+ *
+ * ★ Deliberately separate from isCartWrite, because the two answer different questions and the failure of
+ *   2026-07-31 was conflating them. The add's WRITE is a POST that usually aborts (status -1), so its
+ *   response never arrives and carries no body. The cart page's READ completes — it is the only response
+ *   in this flow that reliably delivers the cart document, so it is the one identity is asserted against.
+ *
+ * Scoped to GET + a wegmans commerce host + the carts path, and requires a real 2xx: a -1/0 (aborted) or
+ * an error status must NOT be read as a cart, or we would parse a body that is not there.
+ */
+function isCartRead(method: string, url: string, status: number): boolean {
+  if (method !== 'GET') return false;
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
+  return onWegmansApi && /\/commerce\/cart\/carts/i.test(url) && status >= 200 && status < 300;
+}
+
+/**
  * The SKU set in a wegmans cart API response body, or null if this body is not a cart.
  *
  * ★ OBSERVED SHAPE (recon, runs 1093506 / 1096363): a `POST
@@ -1067,9 +1090,45 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
      *
      * Body failures stay swallowed: telemetry must never break the flow. A genuinely unreadable body now
      * surfaces as GATE 2's explicit "no cart body" failure — which is the honest outcome, not a crash.
+     *
+     * ★★ 2026-07-31 — THE SECOND CUT, and the reason the first one still failed. #121 fixed the race it
+     *    targeted (the "no parseable cart body" error is gone), but GATE 2 then fired on the OTHER branch:
+     *    "no cart write was observed". The obvious hypothesis — the ladder returns on the UI transform
+     *    before the write lands, so this wrapper detaches too early — is FALSIFIED by the trace of run
+     *    1105330:
+     *
+     *      lineitems POST at 13:26:27.657Z   ·   that add's ATC-RESULT logged at 13:26:28
+     *
+     *    The write fires roughly a second BEFORE the ladder returns, i.e. squarely inside the window when
+     *    this listener is attached. Timing was never the problem.
+     *
+     *    ★ THE REAL MECHANISM: three of the four `lineitems` POSTs are recorded with **status -1** —
+     *    Playwright's marker for a request that never completed (aborted / cancelled mid-flight). For
+     *    those, Playwright fires `requestfailed`, NOT `response`. A `page.on('response')` listener
+     *    therefore CANNOT see them, no matter how long it stays attached. (The fourth completed with 200
+     *    and carried no body.) The write still reaches the server — the badge climbs 0→1→2→3→4 and the
+     *    teardown clears 4 items — the browser just never surfaces a response for it.
+     *
+     *    ★ So OBSERVING the write and READING the cart are two different events with two different
+     *    primitives, and conflating them is the whole defect:
+     *      • OBSERVE  → `request` event. Fires when the request is ISSUED, so an aborted write still
+     *                   counts. This is what "the write was observed" actually requires.
+     *      • READ     → a response that genuinely completes. The add's POST is not that. The cart page's
+     *                   own GET is (status 200, observed every run) — armed and awaited in verify-cart-4.
      */
     const withCartBodyCapture = async (run: () => Promise<void>): Promise<void> => {
       const parses: Promise<void>[] = [];
+      // ★ OBSERVATION — the `request` event, because an aborted POST never reaches `response`.
+      const onCartRequest = (req: { method: () => string; url: () => string }) => {
+        try {
+          // status is unknown at request time; pass 200 so the shared predicate's `status < 500` arm is
+          // satisfied and the match is decided by method + host + path, which is all we know (and all we
+          // need — a request that was ISSUED is a write we observed).
+          if (isCartWrite(req.method(), req.url(), 200)) cartWriteSeen = true;
+        } catch {
+          /* telemetry never breaks the flow */
+        }
+      };
       const onCartBody = (resp: {
         request: () => { method: () => string };
         url: () => string;
@@ -1099,13 +1158,16 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           /* telemetry never breaks the flow */
         }
       };
+      page.on('request', onCartRequest);
       page.on('response', onCartBody);
       try {
         await run();
-        // ★ THE FIX, in one line: await the bodies HERE — still inside the add step, before the next
-        //   navigation. Nothing is carried across a nav boundary.
+        // Await any bodies HERE — still inside the add step, before the next navigation. Nothing is
+        // carried across a nav boundary. (#121's fix; kept, and still correct for the rare POST that
+        // does complete.)
         await Promise.allSettled(parses);
       } finally {
+        page.off('request', onCartRequest);
         page.off('response', onCartBody);
       }
     };
@@ -1291,7 +1353,36 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     //   list — a catalog change moves the expectation with it instead of manufacturing a failure.
     abortIfOverCap();
     await runStep(page, 'verify-cart-4', async () => {
+      // ★ THE AUTHORITATIVE CART READ — the cart page's own GET, not the add's POST.
+      //
+      // The adds' `lineitems` POSTs abort (status -1) on most runs, so their responses never arrive and
+      // carry no body; see withCartBodyCapture for the trace evidence. The /cart page issues a
+      // `GET …/commerce/cart/carts/` which DOES complete (200 on every run examined) because we are
+      // sitting on the page while it resolves.
+      //
+      // ★ ARMED here (it must precede the navigation that triggers it) but PARSED after GATE 1 — the
+      //   cart-identity gate caught an earlier draft that set serverCartSkus before the render assertion.
+      //   That gate is right: nothing may make a cart-contents claim before the page is proven to have
+      //   rendered. Arming is not a claim; the parse is, so only the parse moves.
+      const cartRead = page
+        .waitForResponse((r) => isCartRead(r.request().method(), r.url(), r.status()), { timeout: STEP_TIMEOUT })
+        .catch(() => null);
       await page.goto(CART_URL, { waitUntil: 'domcontentloaded' });
+
+      // ★ READ THE BODY HERE — before dismissInterstitials, which clicks /continue/i and CAN navigate;
+      //   Playwright discards response bodies on navigation, and a deferred read across a navigation is
+      //   the exact defect #121 fixed. Captured into a LOCAL and deliberately NOT promoted to
+      //   serverCartSkus yet: a capture is not a claim, and no cart-contents claim may precede GATE 1.
+      const cartResp = await cartRead;
+      let readSkus: string[] | null = null;
+      if (cartResp) {
+        try {
+          readSkus = cartSkusFromBody(await cartResp.json());
+        } catch {
+          /* unreadable body → stays null → GATE 2 reports it honestly */
+        }
+      }
+
       await dismissInterstitials(page);
 
       // ── GATE 1: did the /cart APP RENDER? ──────────────────────────────────────────────────────────
@@ -1315,6 +1406,17 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           `line-item list, no cart rows and no empty-cart copy appeared. MEASURED: the page served a shell. ` +
           `This says nothing about what the cart contains; no count or contents assertion is meaningful here.`,
       ).toBeTruthy();
+
+      // ── PROMOTE the authoritative cart read, now that the page is PROVEN to have rendered ──────────
+      // The adds' `lineitems` POSTs abort (status -1) on most runs, so their responses never arrive and
+      // carry no body; see withCartBodyCapture for the trace evidence. The /cart page issues a
+      // `GET …/commerce/cart/carts/` which DOES complete (200 on every run examined) because we are
+      // sitting on the page while it resolves. It is also the LATEST state by construction — it happens
+      // after every add — so it wins over anything an add step captured; no sequence comparison needed.
+      //
+      // Fail-soft: no read, or an unreadable body, leaves serverCartSkus as whatever the add steps
+      // captured (usually null, given the aborts) and GATE 2 below decides what that means.
+      if (readSkus) serverCartSkus = readSkus;
 
       // ── GATE 2: do we HAVE the server's cart for this run? ─────────────────────────────────────────
       // The bodies are ALREADY read and awaited — each inside the add step that produced it (see

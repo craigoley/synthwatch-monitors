@@ -65,6 +65,25 @@ must(
   'the render gate must be asserted BEFORE any cart-contents claim (a count off a shell page means nothing)',
 );
 
+// 4a. ★ THE RENDER GATE MUST BE THE **FIRST** ASSERTION IN THE STEP — not merely before `serverCartSkus`.
+//
+//     The check above keys on one variable name, so it is satisfiable by parsing the cart body into a
+//     DIFFERENT local and asserting on that local before the render gate. That is not hypothetical: the
+//     cart-read fix genuinely needs an early capture (the body must be read before dismissInterstitials,
+//     which clicks /continue/i and can navigate away, discarding it), so the file now contains exactly
+//     such a local. Capturing early is correct; ASSERTING early is the bug this gate exists to stop, and
+//     the distinction is invisible to a name-based check.
+//
+//     So: no expect() may precede the render expect(). That admits the capture and forbids the claim,
+//     whatever the local is called.
+const iFirstExpect = v4.indexOf('expect(');
+const iRenderExpect = v4.lastIndexOf('expect(', iRender);
+must(
+  iFirstExpect !== -1 && iFirstExpect === iRenderExpect,
+  'the render gate must be the FIRST expect() in verify-cart-4 — an assertion before it is a claim about ' +
+    'a page not yet proven to have rendered, no matter which variable it reads',
+);
+
 // 4b. ★ NO DEFERRED BODY READ MAY SURVIVE A NAVIGATION (the 2026-07-30 live red). The first cut read the
 //     cart body from a flow-scoped listener and awaited the parses at verify time — by then the page had
 //     navigated on every add and into /cart, the bodies were gone, and GATE 2 fired on a healthy cart.
