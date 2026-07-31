@@ -44,8 +44,6 @@ jobs:
         run: npm ci || npm install
       - name: Install Playwright (deps only, no browsers needed for --list)
         run: npx playwright install-deps || true
-      - name: Validate manifest (JSON schema via ajv + registry <-> scripts in sync)
-        run: npm run validate:manifest
       - name: Fetch runner shim (live source of truth for implemented expect matchers)
         # The shim single-sources its implemented matchers in SUPPORTED_MATCHERS
         # (synthwatch@main runner/specfetch/specShim.ts, public repo). A failed fetch
@@ -59,11 +57,36 @@ jobs:
             echo "::error title=Matcher gate: runner shim fetch FAILED::Could not fetch the runner shim from $URL (curl --fail: HTTP error / 404). MOST LIKELY the shim moved or was renamed in the runner repo (runner/specfetch/specShim.ts) — update the URL above in .github/workflows/check.yml to match. If this is a transient network blip, re-run the job. Failing CLOSED (hard error) so the matcher allowlist can never silently freeze on the committed snapshot." >&2
             exit 1
           fi
-      - name: Matcher allowlist + banned-pattern gate
-        run: npm run check:matchers
+      # ★ ONE STEP, THE COMPOSITE — package.json is the single source of truth for what gates.
+      #
+      # This replaced four hand-listed steps (validate:manifest / check:matchers / typecheck /
+      # `npx playwright test --list`). That listing is what caused the outage this fixes: three cart
+      # gates were added to the composite in #118/#119/#120 and CI never called it, so they asserted
+      # NOTHING here while passing locally. Measured: 9 of 12 npm scripts were unreachable from CI.
+      #
+      # Adding a gate to `check` in package.json now runs it in CI automatically — no second edit, so
+      # the two cannot drift apart again. `check:ci-wiring` (first in the composite) FAILS the build if
+      # any script becomes unreachable, which closes the class rather than this instance.
+      #
+      # Trade-off accepted: a single step gives coarser attribution in the CI UI than one step per gate.
+      # Each gate prints its own OK/FAILED line, so the log still names the failing gate — and drift-proof
+      # wiring is worth more than a prettier step list.
+      - name: Run the gate suite (composite `npm run check`)
+        run: npm run check
         env:
           SHIM_SOURCE: ${{ runner.temp }}/specShim.ts
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Compile-check scripts (every spec parses + lists)
-        run: npx playwright test --list
+
+      # The BEHAVIOURAL proofs for the cart gates. These drive real Chromium against local fixtures
+      # (no network, no credentials) and were ALSO never running — the gates and their must-go-red
+      # proofs were both dark. Kept out of `npm run check` so the local dev loop stays browser-free;
+      # CI runs both, so every npm script is reachable.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-${{ runner.os }}-
+      - name: Install Chromium (needed by the red-tests)
+        run: npx playwright install chromium
+      - name: Red-tests (must-go-red proofs, real browser)
+        run: npm run redtest
