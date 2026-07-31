@@ -1044,35 +1044,71 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
     // compares. Nothing here is hardcoded: the expectation comes from the PDP each add committed on, so a
     // catalog change moves it rather than faking a failure.
     //
-    // Installed AFTER baseline-clear-cart so the clear's own cart response (an empty cart) cannot be
-    // mistaken for the post-add state, and removed after verify-cart-4 so the teardown clear cannot
-    // overwrite the evidence the assertion already used.
     const expectedAdds: { item: string; sku: string | null }[] = [];
-    let serverCartSkus: string[] | null = null; // latest cart the server returned
+    let serverCartSkus: string[] | null = null; // the LATEST cart the server returned
     let cartWriteSeen = false; // did ANY cart write fire? distinguishes "no request" from "no cart body"
-    const pendingCartBodies: Promise<void>[] = [];
-    const onCartBody = (resp: { request: () => { method: () => string }; url: () => string; status: () => number; json: () => Promise<unknown> }) => {
+    let cartSeq = 0; // arrival order, so "latest response wins" is deterministic (see below)
+    let bestSeq = -1;
+
+    /**
+     * ★ READ THE CART BODY WHERE THE RESPONSE ARRIVES (2026-07-30 fix).
+     *
+     * The first cut of this (#120) installed ONE page-level listener for the whole flow, kicked off
+     * `resp.json()` fire-and-forget, collected the promises, and awaited them later in verify-cart-4.
+     * That RACED THE NAVIGATIONS: this flow navigates on every add (search → PDP) and again into /cart,
+     * and a Playwright response body stops being readable once the page moves on. So every parse
+     * rejected, serverCartSkus stayed null, and GATE 2 fired on runs 11:50 and 12:25 — a live red.
+     *
+     * ★ THE PRECEDENT, followed properly this time: meals2go-cheese-pizza-cart arms its wait BEFORE the
+     *   click and awaits the response AND its .json() IMMEDIATELY, with no navigation in between. That is
+     *   the invariant — NO DEFERRED BODY READ MAY SURVIVE A NAVIGATION — and this wrapper enforces it
+     *   structurally: the listener lives only for the duration of ONE add, and its parses are awaited
+     *   before the wrapper returns, i.e. before the loop can navigate again.
+     *
+     * Body failures stay swallowed: telemetry must never break the flow. A genuinely unreadable body now
+     * surfaces as GATE 2's explicit "no cart body" failure — which is the honest outcome, not a crash.
+     */
+    const withCartBodyCapture = async (run: () => Promise<void>): Promise<void> => {
+      const parses: Promise<void>[] = [];
+      const onCartBody = (resp: {
+        request: () => { method: () => string };
+        url: () => string;
+        status: () => number;
+        json: () => Promise<unknown>;
+      }) => {
+        try {
+          if (!isCartWrite(resp.request().method(), resp.url(), resp.status())) return;
+          cartWriteSeen = true;
+          // Sequence the read so the LATEST response wins deterministically. Promise resolution order is
+          // not arrival order, so "last .then to run" would be arbitrary — and within one add the cart can
+          // both grow and (on a retried rung) be rewritten, so "most SKUs" is wrong too.
+          const seq = cartSeq++;
+          parses.push(
+            resp
+              .json()
+              .then((b) => {
+                const skus = cartSkusFromBody(b);
+                if (skus && seq > bestSeq) {
+                  bestSeq = seq;
+                  serverCartSkus = skus;
+                }
+              })
+              .catch(() => {}),
+          );
+        } catch {
+          /* telemetry never breaks the flow */
+        }
+      };
+      page.on('response', onCartBody);
       try {
-        if (!isCartWrite(resp.request().method(), resp.url(), resp.status())) return;
-        cartWriteSeen = true;
-        // Parse PROMPTLY: a Playwright response body can become unavailable once the page navigates, and
-        // this flow navigates between adds. The promise is collected so verify-cart-4 can await it rather
-        // than race it. Body failures are swallowed — telemetry must never break the flow; a missing body
-        // surfaces as the explicit "no cart body" failure in verify-cart-4, not as a crash here.
-        pendingCartBodies.push(
-          resp
-            .json()
-            .then((b) => {
-              const skus = cartSkusFromBody(b);
-              if (skus) serverCartSkus = skus;
-            })
-            .catch(() => {}),
-        );
-      } catch {
-        /* telemetry never breaks the flow */
+        await run();
+        // ★ THE FIX, in one line: await the bodies HERE — still inside the add step, before the next
+        //   navigation. Nothing is carried across a nav boundary.
+        await Promise.allSettled(parses);
+      } finally {
+        page.off('response', onCartBody);
       }
     };
-    page.on('response', onCartBody);
 
     // ---- STEP(s): search + add each item (search-select + DOM-verified add-to-cart buy-box ladder) ----
     for (const item of SHOPPING_ITEMS) {
@@ -1231,7 +1267,8 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
         // transform OR a cart-write (the transform-independent commit). (Removed the post-add CART-STATE
         // diagnostic block here — a second readCartCount + a transform-probe + a log line that backed NO
         // assertion; the ladder's own commit-or-throw is the coverage.)
-        await addToCartLadder(page, item, addToCart, addToCartMatches);
+        // ★ Wrapped so the cart-body read happens HERE, inside this step, before the loop navigates again.
+        await withCartBodyCapture(() => addToCartLadder(page, item, addToCart, addToCartMatches));
       });
     }
 
@@ -1280,9 +1317,12 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       ).toBeTruthy();
 
       // ── GATE 2: do we HAVE the server's cart for this run? ─────────────────────────────────────────
-      // Await the collected body parses rather than racing them. The two failure texts are distinct so a
-      // fire says which half broke, exactly as meals2go's GATE-E does.
-      await Promise.allSettled(pendingCartBodies);
+      // The bodies are ALREADY read and awaited — each inside the add step that produced it (see
+      // withCartBodyCapture). There is deliberately nothing to await here: an await at this point is what
+      // the 2026-07-30 red was, because by now the page has navigated several times and the bodies are
+      // gone. The two failure texts stay distinct so a fire says which half broke, as meals2go's GATE-E does.
+      // ★ The assertion below is UNCHANGED. It worked — it failed loudly with the true condition instead of
+      //   passing on absent evidence. The read was fixed, not the gate.
       const serverSkus: string[] | null = serverCartSkus;
       expect(
         serverSkus,
@@ -1342,9 +1382,10 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       ).toBe(expected.length);
     });
 
-    // The ledger has served its purpose — stop recording so the teardown clear (an empty cart) cannot
-    // overwrite the evidence the assertion above already used.
-    page.off('response', onCartBody);
+    // (No listener to remove here any more. The recorder is now scoped to a SINGLE add step by
+    // withCartBodyCapture and detached in its own finally, so it cannot still be live at this point —
+    // which also means the teardown clear's empty-cart response can never overwrite the evidence the
+    // assertion above already used. The lifetime is structural rather than remembered.)
 
     // ---- STEP: checkout as PICKUP ------------------------------------------------------------------
     abortIfOverCap();
