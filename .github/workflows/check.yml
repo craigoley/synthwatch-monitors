@@ -5,8 +5,23 @@ name: Check
 # broken monitor script must NOT reach main (and therefore must not sync to
 # SynthWatch prod). Same governance posture as the other SynthWatch repos.
 on:
+  # ★ NO `branches:` FILTER ON pull_request — DELIBERATE, DO NOT ADD ONE BACK.
+  #
+  #   With `branches: [main]` this workflow did not run at all on a PR targeting a non-main base, so a
+  #   STACKED PR displayed only "Auto-merge (trusted authors): skipping" and read to a reviewer as gated
+  #   while asserting nothing. Observed on #124. `main` still requires the `Check` context + 1 review, so
+  #   nothing reached `main` ungated — the hole was the INTERMEDIATE hop, where a stacked PR is reviewed
+  #   and merged into its base with no gate run of its own.
+  #
+  #   That is the same class as the outage this repo's gates exist to close (#123): a check that looks
+  #   present and asserts nothing. scripts/check-pr-trigger-coverage.mjs fails the build if the filter
+  #   comes back.
+  #
+  #   Cost, measured, not assumed: 1 of the last 124 PRs here had a non-main base (4 of 1112 across all
+  #   four repos), so the added CI minutes are ~0.4% of PR volume. No gate in this workflow diffs against
+  #   `main`, so none misbehaves on another base — the one specShim fetch that names `main` is a
+  #   CROSS-REPO fetch of synthwatch@main and is unrelated to this PR's base.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 

@@ -9,7 +9,7 @@
     "validate:manifest": "node scripts/validate-manifest.mjs",
     "check:matchers": "node scripts/check-matchers.mjs",
     "test:compile": "playwright test --list",
-    "check": "npm run check:ci-wiring && npm run validate:manifest && npm run check:matchers && npm run check:clear-cart-gate && npm run check:cart-count-gate && npm run check:cart-identity-gate && npm run typecheck && npm run test:compile",
+    "check": "npm run check:ci-wiring && npm run check:pr-trigger-coverage && npm run validate:manifest && npm run check:matchers && npm run check:clear-cart-gate && npm run check:cart-count-gate && npm run check:cart-identity-gate && npm run typecheck && npm run test:compile",
     "check:clear-cart-gate": "node scripts/check-clear-cart-gate.mjs",
     "redtest:clear-cart": "node scripts/redtest-baseline-clear-cart.mjs",
     "check:cart-count-gate": "node scripts/check-cart-count-gate.mjs",
@@ -19,7 +19,8 @@
     "redtest:cart-body": "node scripts/redtest-cart-body-read.mjs",
     "check:ci-wiring": "node scripts/check-ci-wiring.mjs",
     "redtest": "npm run redtest:clear-cart && npm run redtest:cart-count && npm run redtest:cart-identity && npm run redtest:cart-body && npm run redtest:cart-aborted",
-    "redtest:cart-aborted": "node scripts/redtest-cart-aborted-write.mjs"
+    "redtest:cart-aborted": "node scripts/redtest-cart-aborted-write.mjs",
+    "check:pr-trigger-coverage": "node scripts/check-pr-trigger-coverage.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
