@@ -210,7 +210,7 @@ async function appearsWithin(loc: Loc, ms: number): Promise<boolean> {
  *  duplication to unify: there, a row count only ever reports NON-emptiness, so looseness costs extra
  *  clearing work and can never manufacture a false "empty". Here the count feeds an assertion, so
  *  precision is the requirement. Different jobs, different selectors — left as landed. */
-const CART_ROW_SEL = '.component--cart-item, [data-testid="cart-item"]';
+const CART_ROW_SEL = '[class*="cart-item" i], [data-testid*="cart-item" i], li[class*="item" i]';
 
 /** The cart control's own count, from its aria-label: "View 13 selected items in my Cart" — a word
  *  ("selected") sits between the number and "items", so an optional intervening word is allowed. */
