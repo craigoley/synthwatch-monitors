@@ -228,11 +228,33 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
 
       // The detail pane opens INSTANTLY (trace 849266); a click-settle retry is NOT a failure here,
       // so click without blocking on post-actionability and gate on the PANE appearing instead.
-      await cheesePizza.click({ timeout: 5000, noWaitAfter: true }).catch(() => {});
+      //
+      // ★★ BUT DO NOT DISCARD THE ERROR. Tolerating a settle hiccup and THROWING AWAY the reason the
+      // click failed are different things, and this line used to do both (`.catch(() => {})`).
+      // OBSERVED 2026-08-04 → 08-05: 192 consecutive runs reported
+      //     "STEP d: detail pane did not open after clicking the cheese item."
+      // while the ACTUAL failure, visible only by opening the trace, was
+      //     click → Timeout 5000ms exceeded
+      // because a new August promo `<button disabled aria-label="… $12 Large Cheese …">` had become
+      // the first /cheese/i match and can never satisfy Playwright's enabled check. Anyone reading
+      // error_message investigated `app-pop-open-pane` — an element that was working fine.
+      //
+      // So: keep the tolerance (a click that hiccups but still opens the pane STILL PASSES — the
+      // pane is the gate, unchanged), but when the pane does NOT appear, name the click failure that
+      // preceded it. A swallowed action that later reports as a different step's failure sends the
+      // next reader to the wrong element; the cost is one variable.
+      let clickError: string | null = null;
+      await cheesePizza.click({ timeout: 5000, noWaitAfter: true }).catch((e: unknown) => {
+        clickError = (e instanceof Error ? e.message : String(e)).split('\n')[0];
+      });
       await dismissInterstitials(page);
       await expect(
         page.locator('app-pop-open-pane h1.item-name, app-pop-open-pane button.cart-button').first(),
-        'STEP d: detail pane did not open after clicking the cheese item.',
+        clickError
+          ? `STEP d: detail pane did not open — AND THE CLICK ITSELF FAILED FIRST: ${clickError}. ` +
+            `Diagnose the CLICK TARGET (is the /cheese/i match a real menu tile, or has a banner/promo ` +
+            `button hijacked it?), not the detail pane.`
+          : 'STEP d: detail pane did not open after clicking the cheese item.',
       ).toBeVisible({ timeout: 20000 });
     });
 
@@ -266,6 +288,11 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
 
       // Click the add button; escalate past the sticky-footer actionability quirk if a normal click
       // is intercepted (force → DOM-level dispatch). The API response below is the success signal.
+      // ★ SAME CLASS AS STEP d (see there): the LAST escalation must not swallow. If all three
+      //   strategies fail, GATE-E below reports "no cart-items POST was attempted" — true, but it
+      //   names the API when the real cause was that no click ever landed. Record it and let GATE-E
+      //   say so. The escalation itself is unchanged: any strategy succeeding still clears the error.
+      let addClickError: string | null = null;
       try {
         await addToCart.scrollIntoViewIfNeeded({ timeout: 5000 });
         await addToCart.click({ timeout: 5000 });
@@ -273,7 +300,9 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
         try {
           await addToCart.click({ force: true, timeout: 5000 });
         } catch {
-          await addToCart.dispatchEvent('click').catch(() => {});
+          await addToCart.dispatchEvent('click').catch((e: unknown) => {
+            addClickError = (e instanceof Error ? e.message : String(e)).split('\n')[0];
+          });
         }
       }
 
@@ -290,7 +319,9 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
           ? `GATE-E: the cart-items POST fired but its response was not observed within ${secs}s — ` +
             `likely a monitor/timing issue (the add probably succeeded); raise CART_WAIT_MS.`
           : `GATE-E: no cart-items POST was attempted within ${secs}s — the add did not fire ` +
-            `(dead handler / wrong target / API contract change).`,
+            `(dead handler / wrong target / API contract change).` +
+            // ★ If every click strategy failed, that is the cause and it outranks the API guess above.
+            (addClickError ? ` ★ AND EVERY CLICK STRATEGY FAILED FIRST: ${addClickError} — diagnose the ADD BUTTON, not the API.` : ''),
       ).toBeTruthy();
 
       // toBeTruthy() above throws (ExpectationError → run 'fail' → red) when addResp is absent, so it is
