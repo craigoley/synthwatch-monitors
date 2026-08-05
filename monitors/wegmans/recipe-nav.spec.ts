@@ -36,25 +36,70 @@ test('Wegmans: recipe nav -> first dinner recipe detail', async ({ page }) => {
   await step('navigate Courses -> Dinner', async () => {
     await dismissInterstitials(page);
     // Wegmans /recipes groups categories into ARIA TABS: Top Categories / Courses / Main
-    // Ingredient / Dietary Preferences / Time. "Courses" is a role="tab" (id=category-tab-courses,
-    // aria-controls=category-tabpanel-courses) — NOT a link, and its panel is lazy: empty + hidden
-    // until the tab is clicked. (Verified from run #844724's trace DOM — the old `link name=courses`
-    // selector never matched, so its best-effort click was skipped and the Dinner wait timed out.)
-    // So we MUST click the Courses tab to reveal the panel that holds Dinner.
+    // Ingredient / Dietary Preferences / Time. "Courses" is a role="tab" — NOT a link — and its
+    // panel is lazy: empty + hidden until the tab is clicked. (Verified from run #844724's trace
+    // DOM — the old `link name=courses` selector never matched, so its best-effort click was
+    // skipped and the Dinner wait timed out.) So we MUST click the tab to reveal the panel.
     const coursesTab = page.getByRole('tab', { name: /courses/i }).first();
-    await expect(coursesTab).toBeVisible({ timeout: 15000 });
+    await expect(coursesTab, 'the Courses tab did not render on /recipes.').toBeVisible({ timeout: 15000 });
+
+    // Read the panel id BEFORE activating the tab. aria-controls is static, so the panel's IDENTITY
+    // does not depend on how the tablist re-renders on click — one less thing to be true at once.
+    const panelId = await coursesTab.getAttribute('aria-controls');
     await coursesTab.click();
 
-    // Dinner renders into the now-revealed Courses panel. Scope to that panel (#category-
-    // tabpanel-courses) so the "Weeknight dinners made easy" page heading can't false-match, and
-    // accept link OR button (Dinner's exact role isn't observable until the tab opens). Resilient
-    // name match (starts with "dinner"), not the brittle exact-link the real DOM doesn't satisfy.
-    const coursesPanel = page.locator('#category-tabpanel-courses');
+    // ★★ THE PANEL IS FOUND VIA THE TAB'S OWN aria-controls, NOT A HARDCODED id.
+    //
+    // OBSERVED 2026-08-03 15:01Z → 08-05: 144 consecutive failures. Wegmans re-generated every
+    // tab/panel id with a POSITIONAL SUFFIX:
+    //     category-tab-courses        → category-tab-courses-1
+    //     #category-tabpanel-courses  → #category-tabpanel-courses-1
+    //     (…-top-categories-0, …-main-ingredient-2, …-dietary-preferences-3, …-time-4)
+    // The tab locator is role+name so it kept working; only this panel id died, and Dinner was
+    // then searched inside an EMPTY set — which is why the failure read "expected element to be
+    // visible" rather than anything about the panel. Dinner itself never changed: it is still
+    // <a href="/recipes/search?course=dinner">Dinner</a>.
+    //
+    // ★ DO NOT SWAP IN THE NEW LITERAL id. `courses-1` encodes the tab's ORDINAL POSITION — insert
+    //   or reorder one category and it becomes `courses-2`, i.e. pinning it re-arms this exact
+    //   failure. aria-controls is the relationship the site MUST maintain for the tabs to work for
+    //   screen readers, so it survives both an id rename and a reorder.
+    //
+    // ★★ AND IT FAILS CLOSED — NO "just use the visible tabpanel" FALLBACK.
+    //    That fallback is tempting and WRONG. Top Categories is the un-hidden panel until the
+    //    Courses click actually lands, so if the click were ever silently dropped the fallback would
+    //    resolve THAT panel, the panel assertion below would PASS on it, and the run would then
+    //    blame a missing "Dinner" entry — a green gate on the wrong element followed by a
+    //    misdirecting error. That is precisely the vacuous-pass class this repo's gates ban: a check
+    //    that cannot identify what it is asserting on must FAIL, not guess.
+    //    Losing aria-controls would be a real change to the navigation contract this monitor rides
+    //    on, and it deserves a human re-anchoring it, not a heuristic quietly picking a panel.
+    if (!panelId) {
+      throw new Error(
+        'the Courses tab exposes no aria-controls — the tablist lost the ARIA relationship this ' +
+          'monitor anchors on. Refusing to guess which panel is the Courses panel (the visible one ' +
+          'is Top Categories until the click lands, so guessing can assert on the wrong panel and ' +
+          'then blame a missing Dinner). Re-anchor the panel lookup deliberately.',
+      );
+    }
+    const coursesPanel = page.locator(`[id="${panelId}"]`);
+
+    // ★ Assert the PANEL first, so the two failure modes stop sharing one message: "the panel never
+    //   opened" (this line) is a different defect from "the panel opened but Dinner is gone" (below).
+    //   Conflating them is what made the id change read as a missing recipe category.
+    await expect(
+      coursesPanel,
+      `the Courses tabpanel (#${panelId}) did not open after clicking the tab.`,
+    ).toBeVisible({ timeout: 15000 });
+
+    // Dinner renders into the now-revealed panel. Scoping to the panel keeps the "Weeknight dinners
+    // made easy" page heading from false-matching; link OR button because Dinner's exact role is not
+    // observable until the tab opens. Resilient name match (starts with "dinner").
     const dinner = coursesPanel
       .getByRole('link', { name: /^dinner\b/i })
       .or(coursesPanel.getByRole('button', { name: /^dinner\b/i }))
       .first();
-    await expect(dinner).toBeVisible({ timeout: 15000 });
+    await expect(dinner, 'the Courses tabpanel opened but holds no "Dinner" entry.').toBeVisible({ timeout: 15000 });
     await dinner.click();
   });
 
