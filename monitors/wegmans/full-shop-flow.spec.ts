@@ -1903,6 +1903,49 @@ function isCartClearWrite(method: string, url: string, status: number): boolean 
   return onWegmansApi && /\/(cart|basket|line-?items?)/i.test(url) && (method === 'DELETE' || /empty|clear|delete/i.test(url)) && status < 500;
 }
 
+// ── ★★ WHICH SUB-STEP ACTUALLY FAILED ───────────────────────────────────────────────────────────────
+//
+// ★ THE BUG THIS REPLACES: `failedAt` was assigned BEFORE each sub-step and only overwritten by the
+//   next one, so it recorded "the last sub-step REACHED", not the one that failed. Any run that got to
+//   the end therefore reported FINAL-COUNT no matter what broke — and the SERVER-PERSIST promotion,
+//   keyed on that, then blamed the API on runs where no click had ever landed (run 1145685).
+
+/** Sub-steps whose FAIL is ADVISORY — recorded for the reader, but not a verdict on the run.
+ *
+ *  ★ NAV reports FAIL when the cart-app probe does not see a cart container, yet the flow proceeds and
+ *    routinely succeeds anyway (observed repeatedly: `NAV FAIL … cartApp=n` immediately followed by
+ *    `INITIAL-COUNT OK cart=4`). It is a hint about the landing, not proof of one — and a genuine
+ *    navigation failure is NOT hidden by excluding it, because cartResidual then cannot read the cart
+ *    and INITIAL-COUNT fails on the very next line. So a real nav break still names itself; only the
+ *    false alarm is suppressed. Without this, "first FAIL" would answer NAV on nearly every failing
+ *    run — trading one wrong-by-construction label for another. */
+const ADVISORY_SUBSTEPS: ReadonlySet<string> = new Set(['NAV']);
+
+/** Evidence that the CONFIRM click reached the server — the only basis on which SERVER-PERSIST is honest. */
+export interface ConfirmEvidence {
+  /** Cart-clear writes observed AFTER the confirm click specifically (clearWrites.slice(writesBeforeConfirm)). */
+  postConfirmWrites: number;
+  /** Whether the "Yes, delete items" click actually succeeded. */
+  confirmClicked: boolean;
+}
+
+/**
+ * The label for CLEAR-SUMMARY and the thrown error: the first NON-ADVISORY sub-step that failed,
+ * promoted to SERVER-PERSIST only when the evidence for that claim exists.
+ *
+ * ★ BOTH HALVES OF THE PROMOTION ARE REQUIRED. It previously fired on `clearWrites.length > 0`, but
+ *   clearWrites accumulates from an always-on page.on('response') for the WHOLE step — so a write from
+ *   the add-to-cart phase, or from anything else touching a cart path, satisfied it. "The server took
+ *   the delete and dropped it" is a specific accusation; it needs a write attributable to the confirm
+ *   click (post-confirm slice) AND a confirm click that actually landed. Absent either, the honest
+ *   label is FINAL-COUNT: the cart did not empty and we cannot say the server is at fault.
+ */
+export function classifyClearFailure(firstFail: string | null, ev: ConfirmEvidence): string {
+  const label = firstFail ?? 'FINAL-COUNT';
+  if (label !== 'FINAL-COUNT') return label; // something earlier broke — that is the answer, not the API
+  return ev.postConfirmWrites > 0 && ev.confirmClicked ? 'SERVER-PERSIST' : 'FINAL-COUNT';
+}
+
 // ── ★★ THE "ALL DEPARTMENTS" MEGA-MENU — the thing that actually occludes the cart toolbar ──────────
 //
 // MEASURED on wegmans.com at the runner's exact 1280x720 viewport:
@@ -2122,7 +2165,11 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       const MAX_ATTEMPTS = 2; // first attempt + one retry
       let remaining = -1;
       let initialCount = -1; // the N to clear (from the first attempt) — for CLEAR-SUMMARY
-      let failedAt = 'unknown'; // the last sub-step that did not reach OK — for CLEAR-SUMMARY + the throw
+      // ★ Assigned ONCE, at the end, from classifyClearFailure — never accumulated as we go. It used to be
+      //   set BEFORE each sub-step, which recorded the last sub-step REACHED rather than the one that
+      //   failed; every run that got to the end therefore said FINAL-COUNT. `firstFail` (below) is now the
+      //   only input, and it is captured by `crumb` from the result it actually emits.
+      let failedAt = 'unknown';
       // ★ Playwright's OWN reason for a failed click, kept instead of discarded (see actionLogLines).
       //   `…Why` (short) goes in the breadcrumb line; `…Full` (headline + cause-first call log) is appended
       //   to the thrown error_message, which is what runs.error_message and the alert actually show.
@@ -2133,9 +2180,19 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       let confirmClickWhy = '';
       let confirmClickFull = '';
       const crumbs: string[] = []; // accumulate the CLEAR-STEP lines → thrown error_message carries the breadcrumb
+      // ★ THE FIRST NON-ADVISORY SUB-STEP THAT REPORTED FAIL — captured HERE, in the same call that emits
+      //   the result, so the label can never drift from what the breadcrumb says (the old `failedAt = 'X'`
+      //   assignments were a parallel bookkeeping that recorded arrival, not outcome). Never overwritten:
+      //   the first real break is what explains the run; later FAILs are its consequences.
+      let firstFail: string | null = null;
       const crumb = async (sub: string, result: string, detail = '') => {
+        if (result === 'FAIL' && firstFail === null && !ADVISORY_SUBSTEPS.has(sub)) firstFail = sub;
         crumbs.push(await clearStep(page, label, sub, result, detail));
       };
+      // Evidence for the SERVER-PERSIST claim, accumulated at the confirm/delete sub-steps (see
+      // classifyClearFailure). Defaults say "no evidence", so the label cannot be claimed by accident.
+      let confirmClickedEver = false;
+      let postConfirmWrites = 0;
 
       // ── ★ BADGE-HINT (was: BADGE-FIRST SHORT-CIRCUIT) ─────────────────────────────────────────────
       // This used to SHORT-CIRCUIT the whole step: read the header cart badge on the CURRENT page and, on a
@@ -2172,7 +2229,6 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         const tag = `attempt=${attempt + 1}`;
 
         // ── SUB-STEP 1: NAV — navigate to the cart page + log the URL we actually landed on ──────────────
-        failedAt = 'NAV';
         const navOk = await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).then(() => true).catch(() => false);
         await dismissInterstitials(page);
         const landedUrl = safeLoc(page.url());
@@ -2184,13 +2240,11 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         if (attempt === 0) initialCount = before;
         await crumb('INITIAL-COUNT', before < 0 ? 'FAIL' : 'OK', `${tag} cart=${before}`);
         if (before === 0) {
-          failedAt = 'none';
           await crumb('SUMMARY', 'OK', `${tag} already-empty initial=${initialCount} final=0`);
           return;
         }
 
         // ── SUB-STEP 2: COOKIE-BANNER — present? dismissed? (can intercept the ⋮ click / overlay the dialog) ──
-        failedAt = 'COOKIE-BANNER';
         const cookie = await dismissCookieBanner(page);
         await crumb('COOKIE-BANNER', 'OK', `${tag} state=${cookie}`);
 
@@ -2220,7 +2274,6 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           .first();
 
         // ── SUB-STEP 4: MEATBALL-FOUND — is the ⋮ "cart actions" button located + visible? ────────────────
-        failedAt = 'MEATBALL-FOUND';
         const meatball = page
           .getByRole('button', { name: /more options|more actions|cart actions|cart options|^more$|^options$|^actions$|^menu$/i })
           .or(page.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').filter({ visible: true }))
@@ -2234,7 +2287,6 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         // ── SUB-STEP 5: MEATBALL-CLICKED / MENU-OPEN — open the ⋮ menu ROBUSTLY, then VERIFY it opened. The old
         //    code did a single plain click then BLINDLY clicked "Empty My Cart"; robustClickToOpen tries the
         //    click-strategy ladder, treating "Empty My Cart" becoming visible as the open signal, up to 3 tries.
-        failedAt = 'MENU-OPEN';
         let openedVia: string | null = null;
         let openWhy = ''; // ★ why the LADDER lost, when it does — was `via=NONE` and nothing else
         for (let openTry = 0; openTry < 3 && openedVia === null; openTry++) {
@@ -2256,7 +2308,6 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
 
         if (menuOpen) {
           // ── SUB-STEP 6: EMPTY-CLICKED — click "Empty My Cart" (the trash-icon dropdown item). ───────────
-          failedAt = 'EMPTY-CLICKED';
           // ★★ THE ONE THAT COST A TRACE DOWNLOAD. This click's error carried
           //    "<a class='menu-link'>Seafood</a> from <header role='banner'> subtree intercepts pointer
           //    events" after 12 retries — the whole answer — and `.catch(() => false)` dropped it, leaving
@@ -2320,7 +2371,6 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
 
           // ── SUB-STEP 7: DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Live screenshots:
           //    title "Delete Items", PRIMARY button EXACTLY "Yes, delete items" (red), secondary "Cancel".
-          failedAt = 'DIALOG-APPEARED';
           const dialog = page.locator('[role="dialog"], [role="alertdialog"]').filter({ visible: true }).last();
           const confirmBtn = dialog
             .getByRole('button', { name: /yes,?\s*delete items/i })
@@ -2341,13 +2391,11 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           //   Surfaced explicitly so one fire rules dismiss-closes-dialog in or out for good.
           const dialogSurvived = confirmShown ? await isVisibleSafe(confirmBtn) : false;
           if (confirmShown && !dialogSurvived) {
-            failedAt = 'DIALOG-VANISHED';
             await crumb('DIALOG-VANISHED', 'FAIL', `${tag} confirm-btn-gone-after-cookie-dismiss`);
           }
 
           if (dialogSurvived) {
             // ── SUB-STEP 8: CONFIRM-CLICKED — click "Yes, delete items". ─────────────────────────────────
-            failedAt = 'CONFIRM-CLICKED';
             const writesBeforeConfirm = clearWrites.length;
             // ★ Arm the clear-write wait BEFORE the confirm click (#91) so a fast server response can't land
             //   between the click and a later waitForResponse arm. (The always-on onClearResp listener still
@@ -2375,9 +2423,12 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
 
             // ── SUB-STEP 9: DELETE-FIRED — did a cart-clear/delete NETWORK write fire after the confirm? ──
             //    The wait was armed before the click; read what the listener saw once it settles.
-            failedAt = 'DELETE-FIRED';
             await delRespPromise;
             const fired = clearWrites.slice(writesBeforeConfirm);
+            // ★ The SERVER-PERSIST evidence, captured where it is actually known: writes attributable to
+            //   THIS confirm click (not the whole step), and whether the click landed at all.
+            confirmClickedEver = confirmClickedEver || confirmClicked;
+            postConfirmWrites += fired.length;
             const lastWrite = fired[fired.length - 1];
             await crumb(
               'DELETE-FIRED',
@@ -2390,13 +2441,11 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         // ── SUB-STEP 10: FINAL-COUNT / VERIFY — FRESH nav + cartResidual, which requires a POSITIVE
         //    mounted-cart proof of emptiness (rendered empty copy, or the list container with no children).
         //    NOT the header badge on its own: a `0` from that can be a pre-hydration render. ────────────
-        failedAt = 'FINAL-COUNT';
         await page.goto(CART_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
         await dismissInterstitials(page);
         remaining = await cartResidual(page);
         await crumb('FINAL-COUNT', remaining === 0 ? 'OK' : 'FAIL', `${tag} before=${before} remaining=${remaining}`);
         if (remaining === 0) {
-          failedAt = 'none';
           await crumb('SUMMARY', 'OK', `${tag} initial=${initialCount} final=0`);
           return; // durably empty
         }
@@ -2405,10 +2454,12 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       // failing sub-step; the breadcrumb (every CLEAR-STEP line) is folded into the thrown error_message so
       // the persisted failure trace pinpoints WHERE the clear broke (nav / cookie / meatball / menu-open /
       // empty-click / dialog / confirm / delete-fired / final-count) with initial=N final=M — no more guessing.
-      // ★ SERVER-PERSIST classification (#91): every client sub-step succeeded AND a clear-write fired, yet
-      //   the count held — the server accepted the delete but didn't persist it (a different bug class than
-      //   any client-side break; route the fix at the API, not the UI flow).
-      if (failedAt === 'FINAL-COUNT' && clearWrites.length > 0) failedAt = 'SERVER-PERSIST';
+      // ★ SERVER-PERSIST classification (#91): every client sub-step succeeded AND a write attributable to
+      //   the CONFIRM CLICK fired, yet the count held — the server accepted the delete but didn't persist
+      //   it (a different bug class than any client-side break; route the fix at the API, not the UI flow).
+      //   Both halves are now required — see classifyClearFailure for why `clearWrites.length > 0` alone
+      //   let a write from the add-to-cart phase award this label to a run where no click ever landed.
+      failedAt = classifyClearFailure(firstFail, { postConfirmWrites, confirmClicked: confirmClickedEver });
       // ★★ THE CLICK REASON OUTRANKS THE SUB-STEP LABEL. Run 1145685 reported `failedAt=SERVER-PERSIST`
       //    — "the server accepted the delete but didn't persist it" — while a click had in fact never
       //    landed because the site header was over the button. A label describes WHERE the flow stopped;
