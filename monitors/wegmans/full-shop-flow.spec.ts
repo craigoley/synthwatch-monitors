@@ -432,17 +432,65 @@ function isCartRead(method: string, url: string, status: number): boolean {
  *   is a cart, so an APIM path change cannot silently stop this working. Returns null (not []) when the
  *   body is not a cart, so "not a cart response" stays distinguishable from "a cart with no items".
  */
-function cartSkusFromBody(body: unknown): string[] | null {
+/** The SKU of ONE line item, across both API shapes.
+ *
+ *  ★ THE SKU MOVED A LEVEL DEEPER. Old shape carried it at `lineItems[].sku`; the new one has no such
+ *  field — it is `lineItems[].variant.sku`, mirrored at `lineItems[].productKey`. Preference order is
+ *  variant.sku → productKey → the legacy top-level sku, so a body of either shape yields the same
+ *  string and nothing here has to know which shape it came from. */
+function skuOfLineItem(it: unknown): string | null {
+  if (!it || typeof it !== 'object') return null;
+  const li = it as { sku?: unknown; productKey?: unknown; variant?: { sku?: unknown } | null };
+  const variantSku = li.variant && typeof li.variant === 'object' ? li.variant.sku : undefined;
+  for (const c of [variantSku, li.productKey, li.sku]) {
+    if (typeof c === 'string' && c.length > 0) return c;
+    if (typeof c === 'number' && Number.isFinite(c)) return String(c);
+  }
+  return null;
+}
+
+/** Which shape a cart body is in — for the CART-SHAPE log line. null = neither, i.e. not a cart body. */
+function cartShapeOf(body: unknown): 'grocery' | 'cartData' | null {
   if (!body || typeof body !== 'object') return null;
-  const cartData = (body as { cartData?: unknown }).cartData;
-  if (!Array.isArray(cartData) || cartData.length === 0) return null;
-  const lineItems = (cartData[0] as { lineItems?: unknown } | null)?.lineItems;
-  if (!Array.isArray(lineItems)) return null;
+  const b = body as { grocery?: unknown; cartData?: unknown };
+  const g = b.grocery as { lineItems?: unknown } | null | undefined;
+  if (g && typeof g === 'object' && Array.isArray(g.lineItems)) return 'grocery';
+  if (Array.isArray(b.cartData) && b.cartData.length > 0 && Array.isArray((b.cartData[0] as { lineItems?: unknown } | null)?.lineItems)) {
+    return 'cartData';
+  }
+  return null;
+}
+
+/**
+ * The SKU set in a wegmans cart API response body, or null if this body is not a cart.
+ *
+ * ★★ THE CONTRACT MOVED (observed 2026-08-05, run 1146861, body recovered from the trace once the
+ *    runner stopped dropping `.dat` bodies):
+ *        OLD   body.cartData[0].lineItems[].sku
+ *        NEW   body.grocery.lineItems[].variant.sku      (mirrored at .productKey)
+ *    `cartData` is GONE. A sibling `carts` key exists and is NULL — so a reader that "follows carts"
+ *    finds nothing and looks like an empty cart. Top-level keys are now
+ *    [iws, grocery, shoppingContext, errormessage, hasErrorMessage, errors, carts, errorCode].
+ *
+ * ★ BOTH SHAPES ARE READ, deliberately, for at least one cycle. The new shape is preferred; the old is
+ *   the fallback. It costs one branch, and it means a rollback on Wegmans' side — or a partial rollout
+ *   serving the old shape from some edge — does not red this monitor a second time for the same reason.
+ *   Drop the `cartData` branch once the new shape has held for a while; it is dead weight, not a trap.
+ *
+ * ★ RETURNS null, NOT [], FOR A NON-CART BODY — and that distinction is load-bearing. `[]` means "a cart
+ *   with nothing in it"; null means "this is not a cart body I can read". GATE 2 keys off null to reach
+ *   the shape-change message (with the body's top-level keys as evidence), so collapsing the two would
+ *   turn the next contract change back into a silent "no cart state".
+ */
+function cartSkusFromBody(body: unknown): string[] | null {
+  const shape = cartShapeOf(body);
+  if (shape === null) return null; // not a cart body — the caller reports the CONTRACT, with the keys
+  const b = body as { grocery?: { lineItems?: unknown }; cartData?: Array<{ lineItems?: unknown }> };
+  const lineItems = (shape === 'grocery' ? b.grocery?.lineItems : b.cartData?.[0]?.lineItems) as unknown[];
   const skus: string[] = [];
   for (const it of lineItems) {
-    const sku = it && typeof it === 'object' ? (it as { sku?: unknown }).sku : undefined;
-    if (typeof sku === 'string' && sku.length > 0) skus.push(sku);
-    else if (typeof sku === 'number' && Number.isFinite(sku)) skus.push(String(sku));
+    const sku = skuOfLineItem(it);
+    if (sku !== null) skus.push(sku);
   }
   return skus;
 }
@@ -1452,6 +1500,10 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
           //   with the shape in hand. Names only, never values: this string reaches error_message.
           bodyKeys = body && typeof body === 'object' ? Object.keys(body as Record<string, unknown>) : [];
           readSkus = cartSkusFromBody(body);
+          // ★ WHICH SHAPE ANSWERED — value-free, and it makes the NEXT migration visible on a GREEN run
+          //   instead of only on the red one that follows it. `cartData` appearing again means Wegmans
+          //   rolled back; `null` here is what GATE 2 turns into the contract-moved message below.
+          console.log(`[full-shop-flow] CART-SHAPE ${cartShapeOf(body) ?? 'UNRECOGNISED'} keys=[${bodyKeys.join(',')}]`);
         } catch (e: unknown) {
           parseError = (e instanceof Error ? e.message : String(e)).split('\n')[0].slice(0, 140);
         }
