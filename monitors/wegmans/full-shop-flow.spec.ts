@@ -1903,6 +1903,50 @@ function isCartClearWrite(method: string, url: string, status: number): boolean 
   return onWegmansApi && /\/(cart|basket|line-?items?)/i.test(url) && (method === 'DELETE' || /empty|clear|delete/i.test(url)) && status < 500;
 }
 
+// ── ★★ THE "ALL DEPARTMENTS" MEGA-MENU — the thing that actually occludes the cart toolbar ──────────
+//
+// MEASURED on wegmans.com at the runner's exact 1280x720 viewport:
+//   header[role=banner].component--site-header-desktop   sticky,   0 → 196,  z-index 1000
+//   section.menu-region  (the flyout)                    absolute, 191 → 459, z-index 1200
+// The flyout is `display:none` and ZERO-SIZE when collapsed, so it cannot intercept anything; it only
+// occludes when OPEN, and the failing trace carried aria-expanded="true" x10. So the site header was
+// never the problem — an open mega-menu was, and #131's `hitSelf` probe was measuring the symptom.
+//
+//   clear, clickable viewport band with the flyout OPEN:   460 → 720
+//   clear, clickable viewport band with it CLOSED:         200 → 720
+//
+// ★ A REAL USER CAN CLICK "Empty My Cart" — they close the menu they opened, or scroll. This is a
+//   MONITOR defect (we leave a menu open and click underneath it), NOT a wegmans.com UI defect. Closing
+//   it is the same gesture a user makes, so it costs no fidelity: nothing here can manufacture a green.
+//
+// ★ MEASURED TOGGLES: Escape does NOT close it (the obvious wrong fix). Clicking the trigger again DOES.
+//   It is NOT hover-triggered, so a stray mouse position is not the cause — something clicked it.
+const MEGA_MENU_SEL = 'section.menu-region';
+const MEGA_MENU_TRIGGER_SEL = 'li.component--site-header-all-departments-menu button';
+
+/** State of the mega-menu for the breadcrumb: it was already shut / we shut it / it REFUSED to shut. */
+type MegaMenuState = 'closed' | 'closed-by-us' | 'STILL-OPEN';
+
+/**
+ * Close the All Departments mega-menu if it is open, by CLICKING ITS OWN TRIGGER — the gesture a user
+ * makes. Returns what happened, for the crumb.
+ *
+ * ★ NO BYPASS ON FAILURE, DELIBERATELY. If the menu will not close we return 'STILL-OPEN' and let the
+ *   caller go on to click anyway: the click then fails on the real occlusion and #130 names the
+ *   interceptor. Adding a dispatchEvent/force fallback here would convert "the button is genuinely
+ *   covered" into a green, which is the one outcome this monitor must never produce.
+ */
+async function closeMegaMenu(page: Page): Promise<MegaMenuState> {
+  const menu = page.locator(MEGA_MENU_SEL).first();
+  const isOpen = (): Promise<boolean> =>
+    menu.evaluate((el) => getComputedStyle(el).display !== 'none').catch(() => false);
+  if (!(await isOpen())) return 'closed'; // absent or collapsed — nothing to do, and nothing to report
+  await page.locator(MEGA_MENU_TRIGGER_SEL).first().click({ timeout: 3000 }).catch(() => {});
+  // Deterministic settle on the menu actually going away (bounded), not a blind sleep.
+  await menu.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+  return (await isOpen()) ? 'STILL-OPEN' : 'closed-by-us';
+}
+
 /** Would a real click at this element's centre actually reach IT, or is something on top?
  *
  *  ★ The two coordinate-dispatching rungs of the ladder below (`raw-pointer`, `force`) do NOT hit-test:
@@ -2084,6 +2128,8 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       //   to the thrown error_message, which is what runs.error_message and the alert actually show.
       let emptyClickWhy = '';
       let emptyClickFull = '';
+      // Mega-menu state at the empty-click — 'closed' until we look (see closeMegaMenu).
+      let megaMenu: MegaMenuState = 'closed';
       let confirmClickWhy = '';
       let confirmClickFull = '';
       const crumbs: string[] = []; // accumulate the CLEAR-STEP lines → thrown error_message carries the breadcrumb
@@ -2217,22 +2263,26 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           //    `clicked=n`. The run then reported failedAt=SERVER-PERSIST, sending the reader at the API.
           //    ★ TOLERANCE UNCHANGED: a click that errors but whose effect still lands (the confirm dialog
           //      appears) still passes — DIALOG-APPEARED remains the gate. Only the DIAGNOSIS improves.
-          // ★ SCROLL CLEAR OF THE SITE HEADER BEFORE CLICKING — cheap, harmless, and ONLY SOMETIMES
-          //   SUFFICIENT. Be precise about what this does and does not buy, because the obvious story is
-          //   wrong: measured against real Chromium, Playwright's own pre-click scroll ALREADY recovers an
-          //   element that is off-screen or partially out of view — it is not the naive block:'nearest'
-          //   edge-park it is often described as. So this line only changes the outcome in the narrow band
-          //   where the element sits inside the viewport but underneath a viewport-anchored header, and
-          //   there is room above it to scroll.
+          // ★★ CLOSE THE MEGA-MENU FIRST — the actual remedy (see MEGA_MENU_SEL for the measurements).
+          //    The occluder is section.menu-region, not the header, and it only occludes while OPEN.
+          //    Clicking its own trigger shut is what a user does; if it refuses, we still click and fail
+          //    honestly rather than reaching for a bypass.
+          megaMenu = await closeMegaMenu(page);
+
+          // ★ SCROLL WITH block:'end', NOT 'center' — AND DO NOT "IMPROVE" THIS BACK TO CENTER.
+          //   At 1280x720 the occluded band is 191→459 with the flyout open, 0→196 with it shut.
+          //   block:'center' aims at viewport y ~360 — INSIDE the open-flyout band, i.e. centring targets
+          //   the one position where the button is guaranteed to be covered. That is why #131's centring
+          //   did nothing. 'end' parks it near the viewport bottom instead, in the clear band.
           //
-          // ★★ IT CANNOT HELP AT ALL when the element cannot be scrolled clear — e.g. a fixed/sticky header
-          //    over content near the top of the document, where scrollY is already 0. MEASURED: in that
-          //    geometry the element stays at the same viewport y with or without this call, and the click
-          //    times out identically, interceptor named. If /cart turns out to be that shape, this is a
-          //    no-op and the real remedy is to stop the header overlaying the toolbar (or to give up
-          //    clicking it as a user would). `hitSelf` below is what tells us which shape we are in —
-          //    deliberately measured rather than assumed, because assuming is what cost the last trace.
-          await emptyItem.evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => {});
+          // ★★ BUT THIS IS THE SECONDARY, NOT THE FIX — and it does NOT rescue a mega-menu that refused to
+          //    close. MEASURED (prove-can-fail): with the flyout open and the button near the top of the
+          //    document, block:'end' clamps at scrollY=0 exactly like 'center' did and the click still
+          //    times out. Scrolling only helps when there is content ABOVE the button to scroll through.
+          //    ★ closeMegaMenu is what makes the click land: "close, no scroll at all" was measured
+          //      SUFFICIENT on its own. This line is belt-and-braces for the case where the page happens
+          //      to be scrolled down; it earns its keep cheaply and claims nothing more than that.
+          await emptyItem.evaluate((el) => el.scrollIntoView({ block: 'end' })).catch(() => {});
           // ★ MEASURE WHETHER THAT WORKED, don't assume it. One elementFromPoint at the button's centre
           //   says whether WE are what a click would hit. This is the difference between the next run
           //   answering "is the overlay viewport-anchored or in document flow?" and it costing another
@@ -2260,8 +2310,12 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           await crumb(
             'EMPTY-CLICKED',
             emptyClicked ? 'OK' : 'FAIL',
-            `${tag} clicked=${emptyClicked ? 'y' : 'n'} hitSelf=${hitIsSelf === null ? '?' : hitIsSelf ? 'y' : 'n'}` +
-              `${emptyClickWhy ? ` why=${emptyClickWhy}` : ''}`,
+            // ★ megaMenu= says whether the remedy actually fired: `closed` (nothing to do), `closed-by-us`
+            //   (we shut it — the intended path), or `STILL-OPEN` (it refused, and the click below was
+            //   made into a known occlusion). One glance at the crumb now answers "did the close work?"
+            //   instead of it costing a trace download, which is the whole lesson of #130.
+            `${tag} clicked=${emptyClicked ? 'y' : 'n'} megaMenu=${megaMenu} ` +
+              `hitSelf=${hitIsSelf === null ? '?' : hitIsSelf ? 'y' : 'n'}${emptyClickWhy ? ` why=${emptyClickWhy}` : ''}`,
           );
 
           // ── SUB-STEP 7: DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Live screenshots:
