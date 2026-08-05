@@ -208,22 +208,43 @@ test('Meals2Go: cheese pizza carry-out cart (Buffalo/McKinley)', async ({ page }
       }
       await dismissInterstitials(page);
 
-      // Match a CHEESE pizza, preferring a clickable product card (link → button → any clickable
-      // cheese card) over a bare text node. .first() of the chosen kind (no hardcoded SKU).
-      const cheeseLink = page.getByRole('link', { name: /cheese/i }).first();
-      const cheeseButton = page.getByRole('button', { name: /cheese/i }).first();
-      const cheeseCard = page
-        .locator(
-          'a:has-text("cheese"), button:has-text("cheese"), [data-testid*="product" i]:has-text("cheese"), [data-testid*="item" i]:has-text("cheese"), article:has-text("cheese"), li:has-text("cheese")',
-        )
+      // ★★ MATCH A MENU TILE — NOT "any element whose accessible name contains cheese".
+      //
+      // OBSERVED 2026-08-04 04:02Z → 08-05: 192 consecutive failures. Meals2Go added an August promo
+      // to the cuisine list:
+      //     <button class="unstyled-button cuisine-widget" disabled
+      //             aria-label="Every Tuesday and Wednesday in August Summer Pizza Savings
+      //                         $14 Large 1-Topping $12 Large Cheese $20 Signature">
+      // "$12 Large Cheese" matches /cheese/i; the promo sits FIRST in the cuisine list, ahead of
+      // every product card. Real tiles here are BUTTONS, not links, so cheeseLink.count() was 0, the
+      // chain fell through to cheeseButton, and .first() picked the promo. Being `disabled`, it can
+      // never satisfy Playwright's actionability wait for "enabled" — click → Timeout 5000ms.
+      //
+      // ★ TEXT CANNOT BE THE DISCRIMINATOR HERE. The promo CLASS is not new — `cuisine-widget`
+      //   appears 22x in a PASSING trace from before the break. What changed is promo COPY carrying
+      //   an item keyword, and marketing owns that string; the next campaign can say "cheese" again.
+      //   So discriminate STRUCTURALLY, on the two properties that actually separate a product tile
+      //   from a promo banner in this DOM:
+      //     • class `menu-card-link` (product card)  vs  `cuisine-widget` (promo)
+      //     • :not([disabled])  — a promo banner is inert; a real tile is clickable
+      //   Both verified against the FAILING RUN'S OWN recorded DOM, not just a live browse:
+      //   BUTTON.unstyled-button.menu-card-link (108x) vs the disabled promo (6x).
+      //
+      // ★ NOT scoped to `li.menu-item`, deliberately: the promo lives in `LI.menu-item` TOO (checked
+      //   in the failing trace), so that wrapper discriminates NOTHING. Adding it would have bought
+      //   only a second locator, a `.count()` race against tiles that may not have rendered yet, and
+      //   a swallowed probe to pick between them. One locator, one wait, no branch.
+      //
+      // ★ DELIBERATELY NOT filtered to "available". An "Item temporarily unavailable" tile is still
+      //   opened on purpose: cheese pizza being unbuyable at McKinley is a REAL red this monitor
+      //   exists to catch, and skipping to a purchasable item would hide exactly that.
+      const cheesePizza = page
+        .locator('button.menu-card-link:not([disabled]), a.menu-card-link:not([disabled])')
+        .filter({ hasText: /cheese/i })
         .first();
-      let cheesePizza = cheeseLink;
-      if (!(await cheeseLink.count().catch(() => 0))) {
-        cheesePizza = (await cheeseButton.count().catch(() => 0)) ? cheeseButton : cheeseCard;
-      }
       await expect(
         cheesePizza,
-        'STEP d: no clickable cheese pizza under the thin-crust listing.',
+        'STEP d: no clickable cheese pizza TILE under the thin-crust listing (a promo/banner does not count).',
       ).toBeVisible({ timeout: 20000 });
 
       // The detail pane opens INSTANTLY (trace 849266); a click-settle retry is NOT a failure here,
