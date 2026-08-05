@@ -47,17 +47,30 @@ function isCartRead(method, url, status) {
   const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
   return onWegmansApi && /\/commerce\/cart\/carts/i.test(url) && status >= 200 && status < 300;
 }
-function cartSkusFromBody(body) {
+function skuOfLineItem(it) {
+  if (!it || typeof it !== 'object') return null;
+  const variantSku = it.variant && typeof it.variant === 'object' ? it.variant.sku : undefined;
+  for (const c of [variantSku, it.productKey, it.sku]) {
+    if (typeof c === 'string' && c.length > 0) return c;
+    if (typeof c === 'number' && Number.isFinite(c)) return String(c);
+  }
+  return null;
+}
+function cartShapeOf(body) {
   if (!body || typeof body !== 'object') return null;
-  const cartData = body.cartData;
-  if (!Array.isArray(cartData) || cartData.length === 0) return null;
-  const lineItems = cartData[0]?.lineItems;
-  if (!Array.isArray(lineItems)) return null;
+  const g = body.grocery;
+  if (g && typeof g === 'object' && Array.isArray(g.lineItems)) return 'grocery';
+  if (Array.isArray(body.cartData) && body.cartData.length > 0 && Array.isArray(body.cartData[0]?.lineItems)) return 'cartData';
+  return null;
+}
+function cartSkusFromBody(body) {
+  const shape = cartShapeOf(body);
+  if (shape === null) return null;
+  const lineItems = shape === 'grocery' ? body.grocery.lineItems : body.cartData[0].lineItems;
   const skus = [];
   for (const it of lineItems) {
-    const sku = it && typeof it === 'object' ? it.sku : undefined;
-    if (typeof sku === 'string' && sku.length > 0) skus.push(sku);
-    else if (typeof sku === 'number' && Number.isFinite(sku)) skus.push(String(sku));
+    const sku = skuOfLineItem(it);
+    if (sku !== null) skus.push(sku);
   }
   return skus;
 }

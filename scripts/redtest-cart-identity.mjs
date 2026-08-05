@@ -33,17 +33,30 @@ const CART_LIST_SEL = '[class*="cart-item-list" i], [data-testid*="cart-item-lis
 const CART_ROW_SEL = '.component--cart-item, [data-testid="cart-item"]';
 const CART_EMPTY_RX = /your cart is empty|cart is empty|no items in your cart|start shopping|cart is currently empty/i;
 
-function cartSkusFromBody(body) {
+function skuOfLineItem(it) {
+  if (!it || typeof it !== 'object') return null;
+  const variantSku = it.variant && typeof it.variant === 'object' ? it.variant.sku : undefined;
+  for (const c of [variantSku, it.productKey, it.sku]) {
+    if (typeof c === 'string' && c.length > 0) return c;
+    if (typeof c === 'number' && Number.isFinite(c)) return String(c);
+  }
+  return null;
+}
+function cartShapeOf(body) {
   if (!body || typeof body !== 'object') return null;
-  const cartData = body.cartData;
-  if (!Array.isArray(cartData) || cartData.length === 0) return null;
-  const lineItems = cartData[0]?.lineItems;
-  if (!Array.isArray(lineItems)) return null;
+  const g = body.grocery;
+  if (g && typeof g === 'object' && Array.isArray(g.lineItems)) return 'grocery';
+  if (Array.isArray(body.cartData) && body.cartData.length > 0 && Array.isArray(body.cartData[0]?.lineItems)) return 'cartData';
+  return null;
+}
+function cartSkusFromBody(body) {
+  const shape = cartShapeOf(body);
+  if (shape === null) return null;
+  const lineItems = shape === 'grocery' ? body.grocery.lineItems : body.cartData[0].lineItems;
   const skus = [];
   for (const it of lineItems) {
-    const sku = it && typeof it === 'object' ? it.sku : undefined;
-    if (typeof sku === 'string' && sku.length > 0) skus.push(sku);
-    else if (typeof sku === 'number' && Number.isFinite(sku)) skus.push(String(sku));
+    const sku = skuOfLineItem(it);
+    if (sku !== null) skus.push(sku);
   }
   return skus;
 }
@@ -141,6 +154,64 @@ check(
 );
 check(cartSkusFromBody({ nope: 1 }) === null, 'cartSkusFromBody returns null for a non-cart body (≠ empty cart)');
 check(cartSkusFromBody({ cartData: [{ lineItems: [] }] })?.length === 0, 'an EMPTY cart parses to [] (not null)');
+
+// ── 1b. ★ THE 2026-08-05 CONTRACT MOVE — body.grocery.lineItems[].variant.sku ───────────────────────
+// Recovered from run 1146861's trace once the runner stopped dropping .dat bodies. `cartData` is GONE;
+// a sibling `carts` key exists and is NULL, so a reader that follows `carts` sees an empty cart.
+const NEW_SHAPE_BODY = {
+  iws: null,
+  grocery: {
+    id: 'grocery-id',
+    version: 155,
+    lineItems: [
+      { productKey: '55066', variant: { id: 1, sku: '55066' }, quantity: 1 },
+      { productKey: '46155', variant: { id: 1, sku: '46155' }, quantity: 1 },
+      { productKey: '60715', variant: { id: 1, sku: '60715' }, quantity: 1 },
+      { productKey: '92685', variant: { id: 1, sku: '92685' }, quantity: 1 },
+    ],
+    totalLineItemQuantity: 4,
+  },
+  shoppingContext: null,
+  errormessage: null,
+  hasErrorMessage: false,
+  errors: null,
+  carts: null,
+  errorCode: null,
+};
+const parsedNew = cartSkusFromBody(NEW_SHAPE_BODY);
+check(
+  parsedNew !== null && parsedNew.join(',') === '55066,46155,60715,92685',
+  '★ the NEW shape (grocery.lineItems[].variant.sku) parses to the same SKUs',
+  `got=[${parsedNew}]`,
+);
+check(cartShapeOf(NEW_SHAPE_BODY) === 'grocery', 'cartShapeOf names the new shape');
+check(cartShapeOf(OBSERVED_CART_BODY) === 'cartData', 'cartShapeOf still names the old shape');
+
+// ★ DUAL SUPPORT IS REAL, not incidental: the OLD body must still parse (a Wegmans rollback, or a
+//   partial rollout still serving cartData from some edge, must not red this monitor a second time).
+check(
+  cartSkusFromBody(OBSERVED_CART_BODY)?.join(',') === '55066,46155,60715,92685',
+  '★ the OLD shape still parses — dual support, for at least one cycle',
+);
+
+// ★ productKey is the FALLBACK when variant.sku is absent (the two are mirrored in the real body).
+check(
+  cartSkusFromBody({ grocery: { lineItems: [{ productKey: '55066' }] } })?.join(',') === '55066',
+  'productKey answers when variant.sku is missing',
+);
+
+// ★★ PROVE-CAN-FAIL: a body with NEITHER shape must return null so GATE 2 reaches the CONTRACT-MOVED
+//    message with the keys as evidence — never degrade an unknown shape to "no cart state".
+const MOVED_AGAIN = { iws: null, basket: { items: [{ sku: '55066' }] }, carts: null, errorCode: null };
+check(cartSkusFromBody(MOVED_AGAIN) === null, '★ a THIRD shape returns null (contract-moved, not empty)');
+check(cartShapeOf(MOVED_AGAIN) === null, '★ …and cartShapeOf reports UNRECOGNISED');
+// The old reader would ALSO have returned null here — so this assertion only means something alongside
+// the two above, which prove the new and old shapes DO parse. Stated so the trio is read together.
+check(
+  cartSkusFromBody({ grocery: { lineItems: null } }) === null,
+  'grocery present but lineItems not an array → null, not []',
+);
+check(cartSkusFromBody({ carts: null }) === null, '★ `carts: null` alone is NOT a readable cart');
 check(
   skuFromProductUrl('https://www.wegmans.com/shop/product/92685-Bananas-Sold-by') === '92685',
   'skuFromProductUrl reads the SKU from a PDP slug',
