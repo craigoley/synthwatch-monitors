@@ -1903,6 +1903,25 @@ function isCartClearWrite(method: string, url: string, status: number): boolean 
   return onWegmansApi && /\/(cart|basket|line-?items?)/i.test(url) && (method === 'DELETE' || /empty|clear|delete/i.test(url)) && status < 500;
 }
 
+/** Would a real click at this element's centre actually reach IT, or is something on top?
+ *
+ *  ★ The two coordinate-dispatching rungs of the ladder below (`raw-pointer`, `force`) do NOT hit-test:
+ *  they aim at a point and let the browser route the event to whatever is topmost. That is fine when the
+ *  element is clear and actively dangerous when it is not — on /cart the topmost element over the cart
+ *  toolbar is a site-header category LINK, so an ungated rung navigates away mid-run. This is the guard
+ *  those two rungs consult. Fail-CLOSED: an evaluate that throws (detached node) returns false, i.e. the
+ *  rung is skipped rather than fired blind. */
+async function hitTargetIsTrigger(loc: Loc): Promise<boolean> {
+  return loc
+    .evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return hit !== null && (el === hit || el.contains(hit) || hit.contains(el));
+    })
+    .catch(() => false);
+}
+
 /** ★ ROBUST-CLICK LADDER for a React control that ACCEPTS a click but whose onClick does not fire on a plain
  *  locator.click() — the SAME click-strategy ladder addToCartLadder uses (hydrate+locator → precise-center →
  *  raw-pointer → dispatch-events → force), generalized to any trigger + caller-supplied success probe.
@@ -1946,6 +1965,10 @@ async function robustClickToOpen(
         const box = await t.boundingBox();
         if (!box) throw new Error('raw-pointer: no bounding box');
         await t.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+        // ★ HIT-TARGET GUARD (see hitTargetIsTrigger). page.mouse dispatches at COORDINATES, so if an
+        //   overlay covers the trigger this rung clicks the OVERLAY — silently, and reported as a rung
+        //   that merely "didn't open the menu".
+        if (!(await hitTargetIsTrigger(t))) throw new Error('raw-pointer: occluded — refusing to click through an overlay');
         await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
         await page.mouse.down();
         await page.mouse.up();
@@ -1969,6 +1992,19 @@ async function robustClickToOpen(
     {
       name: 'force',
       run: async () => {
+        // ★★ THE force HAZARD, CLOSED. `force: true` skips Playwright's hit-target CHECK — it does NOT
+        //    stop the browser from hit-testing. The click is still a real mouse event at the trigger's
+        //    coordinates, so when an overlay covers it the TOPMOST element receives it. On /cart that
+        //    topmost element is <a href="/shop/categories/2957058">Seafood</a> in the site header — i.e.
+        //    this rung's "robust" fallback would NAVIGATE THE RUN OFF THE CART PAGE, and everything
+        //    downstream (count, empty, confirm) would then be measuring the wrong page. A fallback that
+        //    silently leaves the page is worse than one that fails.
+        //
+        // ★ GATED, NOT DELETED. force exists for the real case it was added for: a React control that is
+        //   genuinely under the cursor but whose actionability check Playwright will not satisfy (an
+        //   animating ancestor, a never-"stable" element). That case still works. What is now refused is
+        //   the one where force would click SOMETHING ELSE — which it could never have fixed anyway.
+        if (!(await hitTargetIsTrigger(t))) throw new Error('force: occluded — refusing to force-click through an overlay');
         await t.click({ force: true, timeout: RUNG_CLICK_TIMEOUT });
       },
     },
@@ -2115,11 +2151,25 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         // The "Empty My Cart" dropdown item — the SUCCESS PROBE for "the menu opened" AND the click target.
         // Trace 935321: when the menu is CLOSED this renders 0x, so its visibility is the reliable menu-open
         // signal (the menu items only exist inside the OPEN dropdown).
+        // ★★ THE SEMANTIC CLASS, NOT A 4-WAY NAME CHAIN. Trace of run 1145685 shows what the old
+        //    .or(menuitem).or(button).or(link).or(getByText) chain actually resolved to:
+        //      <button class="component--base-button component--carts-empty-button …">
+        //    — a purpose-built control with its own class. The name chain was four ways of guessing at
+        //    something the markup states outright, and its last rung (getByText) could only ever match a
+        //    text node, which is visible but not clickable.
+        //
+        // ★★ :not([aria-disabled="true"]) IS LOAD-BEARING — DO NOT "SIMPLIFY" IT AWAY.
+        //    A SECOND rendering of the SAME class exists in this DOM, disabled:
+        //      <button aria-disabled="true" class="… component--carts-empty-button … is-disabled …">
+        //    alongside disabled "Share My Cart" / "Add to My Saved Lists" siblings. Nothing in the old
+        //    locator pinned which one resolved. That is exactly the failure this fleet already ate on
+        //    Meals2Go (#129): a VISIBLE but DISABLED control matched first, satisfied every visibility
+        //    probe, and then timed out on click because Playwright waits for "enabled" forever. Here it
+        //    is latent rather than firing — pin it before it does.
+        //    ★ aria-disabled, not :disabled — this is an ARIA-disabled button, not a native disabled one,
+        //      so the CSS :disabled pseudo-class does NOT match it.
         const emptyItem = page
-          .getByRole('menuitem', { name: /empty (my )?cart/i })
-          .or(page.getByRole('button', { name: /empty (my )?cart/i }))
-          .or(page.getByRole('link', { name: /empty (my )?cart/i }))
-          .or(page.getByText(/empty my cart/i))
+          .locator('button.component--carts-empty-button:not([aria-disabled="true"])')
           .filter({ visible: true })
           .first();
 
@@ -2167,6 +2217,33 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           //    `clicked=n`. The run then reported failedAt=SERVER-PERSIST, sending the reader at the API.
           //    ★ TOLERANCE UNCHANGED: a click that errors but whose effect still lands (the confirm dialog
           //      appears) still passes — DIALOG-APPEARED remains the gate. Only the DIAGNOSIS improves.
+          // ★ SCROLL CLEAR OF THE SITE HEADER BEFORE CLICKING — cheap, harmless, and ONLY SOMETIMES
+          //   SUFFICIENT. Be precise about what this does and does not buy, because the obvious story is
+          //   wrong: measured against real Chromium, Playwright's own pre-click scroll ALREADY recovers an
+          //   element that is off-screen or partially out of view — it is not the naive block:'nearest'
+          //   edge-park it is often described as. So this line only changes the outcome in the narrow band
+          //   where the element sits inside the viewport but underneath a viewport-anchored header, and
+          //   there is room above it to scroll.
+          //
+          // ★★ IT CANNOT HELP AT ALL when the element cannot be scrolled clear — e.g. a fixed/sticky header
+          //    over content near the top of the document, where scrollY is already 0. MEASURED: in that
+          //    geometry the element stays at the same viewport y with or without this call, and the click
+          //    times out identically, interceptor named. If /cart turns out to be that shape, this is a
+          //    no-op and the real remedy is to stop the header overlaying the toolbar (or to give up
+          //    clicking it as a user would). `hitSelf` below is what tells us which shape we are in —
+          //    deliberately measured rather than assumed, because assuming is what cost the last trace.
+          await emptyItem.evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => {});
+          // ★ MEASURE WHETHER THAT WORKED, don't assume it. One elementFromPoint at the button's centre
+          //   says whether WE are what a click would hit. This is the difference between the next run
+          //   answering "is the overlay viewport-anchored or in document flow?" and it costing another
+          //   trace download — the open question this fix rests on (see the PR).
+          const hitIsSelf = await emptyItem
+            .evaluate((el) => {
+              const r = el.getBoundingClientRect();
+              const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+              return hit !== null && (el === hit || el.contains(hit));
+            })
+            .catch(() => null);
           const emptyClicked = await emptyItem
             .click({ timeout: 4000 })
             .then(() => true)
@@ -2183,7 +2260,8 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
           await crumb(
             'EMPTY-CLICKED',
             emptyClicked ? 'OK' : 'FAIL',
-            `${tag} clicked=${emptyClicked ? 'y' : 'n'}${emptyClickWhy ? ` why=${emptyClickWhy}` : ''}`,
+            `${tag} clicked=${emptyClicked ? 'y' : 'n'} hitSelf=${hitIsSelf === null ? '?' : hitIsSelf ? 'y' : 'n'}` +
+              `${emptyClickWhy ? ` why=${emptyClickWhy}` : ''}`,
           );
 
           // ── SUB-STEP 7: DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Live screenshots:
