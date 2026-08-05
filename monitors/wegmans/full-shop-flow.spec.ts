@@ -1736,13 +1736,117 @@ async function cartResidual(page: Page): Promise<number> {
   return -1; // UNKNOWN — no positive mounted-cart proof of emptiness; never reported as empty
 }
 
+// ── ★★ PLAYWRIGHT ACTION FAILURES: KEEP THE CALL LOG ────────────────────────────────────────────────
+//
+// ★ WHY THIS EXISTS. Playwright does not just say "click timed out" — it hands back an ACTIONABILITY CALL
+// LOG inside `error.message` that names the exact reason, e.g.
+//     locator.click: Timeout 4000ms exceeded.
+//     Call log:
+//       - locator resolved to <button class="… component--carts-empty-button …">…</button>
+//       -   element is visible, enabled and stable
+//       -   <a class="menu-link">Seafood</a> from <header role="banner"> subtree intercepts pointer events
+//       - retrying click action  (x12)
+// Every `.catch(() => false)` on a click in this file THREW THAT AWAY. Run 1145685 (2026-08-05) reported
+// `failedAt=SERVER-PERSIST … cart NOT empty` — pointing a reader at the SERVER — when the truth was a CSS
+// overlay: the site header covering the button. Recovering it cost an 8 MB trace download and parsing
+// Playwright's internal `log` trace events. The engine had already computed the answer; we discarded it.
+// (Same class as the Meals2Go fix in #127, but worse: that one blamed a sibling ELEMENT, this blamed a
+// different SUBSYSTEM.)
+//
+// ★ CAUSE-FIRST ORDERING IS THE POINT, NOT PRETTINESS. The call log is ~12 near-identical retry cycles, so
+// a naive head-truncation spends the budget on "retrying click action" and cuts off the one line that
+// names the interceptor. These helpers DEDUPE (each distinct line once) and then sort CAUSE lines to the
+// front, so whatever the cap is, the reason survives and only context is lost.
+//
+// ★ Structural only — element tags/classes/roles from Playwright's own log. No creds, token or PII (and
+// the runner additionally scrubs error_message for a sensitive check).
+
+/** ★ The lines that state the REASON an action could not proceed. Deliberately NARROW: an earlier version
+ *  of this also matched `resolved to` and `element is …`, and those two — which are CONTEXT, and appear
+ *  EARLIER in the log — crowded the interceptor line out of the budget entirely. Verified against the real
+ *  6.3 KB error from run 1145685: with them in, "intercepts pointer events" did not survive either cap. */
+const PW_CAUSE_RX =
+  /intercepts pointer events|not stable|not enabled|not visible|not attached|outside of the viewport|element is not|did not receive/i;
+/** Useful, but only AFTER the reason: what we aimed at, and the confirmation it looked fine. */
+const PW_CONTEXT_RX = /resolved to|element is /i;
+
+/** One call-log line, bounded — so a single enormous element dump cannot consume the whole budget and
+ *  starve the lines after it.
+ *
+ *  ★★ ELIDES THE MIDDLE, NOT THE TAIL, AND THAT IS THE WHOLE POINT. Playwright writes the interception
+ *  line as `<a …200 chars of Tailwind classes…> from <header …> subtree intercepts pointer events` — the
+ *  identity is at the FRONT and the DIAGNOSIS is at the BACK, with junk between. Head-truncating it keeps
+ *  the class list and throws away "intercepts pointer events", which is the only part that matters. (This
+ *  is not hypothetical: the first version of this function did exactly that and the prove-can-fail run
+ *  against the real 6.3 KB error from run 1145685 reported the phrase MISSING.) */
+function pwLine(s: string, cap = 150): string {
+  // ★ DROP THE TAILWIND UTILITY TOKENS FIRST. Wegmans' markup carries dozens of `tw:*` classes per element
+  //   (`tw:hidden tw:lg:block tw:print:hidden tw:relative …`); they are pure layout noise, they sit BETWEEN
+  //   the two things that identify an element (`component--carts-empty-button`, `component--site-header-
+  //   desktop`), and at ~60% of every dump they are what pushes those names out of any budget. Measured on
+  //   the real error: without this, neither the target's class nor the overlay's owner survived; with it,
+  //   both do. Narrow and reversible — it removes one prefixed token class, nothing else.
+  const t = s.replace(/\s*\btw:[^\s"']+/g, '').replace(/\s{2,}/g, ' ').replace(/class="\s*"/g, '').trim();
+  if (t.length <= cap) return t;
+  const head = Math.ceil((cap - 1) * 0.55);
+  return `${t.slice(0, head)}…${t.slice(-(cap - 1 - head))}`;
+}
+
+/** Lines of a Playwright action error, deduped, ordered REASON → context → scaffolding. */
+function actionLogLines(e: unknown): { headline: string; lines: string[] } {
+  const raw = e instanceof Error ? e.message : String(e);
+  const seen = new Set<string>();
+  const all: string[] = [];
+  for (const l of raw.split('\n')) {
+    const t = l.replace(/^\s*-\s*/, '').trim();
+    if (t && t !== 'Call log:' && !seen.has(t)) {
+      seen.add(t);
+      all.push(t);
+    }
+  }
+  const headline = pwLine(all.shift() ?? 'unknown error');
+  // ★ CLASSIFY ON THE FULL LINE, TRIM ONLY WHEN RENDERING. Testing a trimmed line is how the first version
+  //   of this lost the interceptor twice over: the phrase it matches on had already been cut off.
+  const cause = all.filter((l) => PW_CAUSE_RX.test(l));
+  const context = all.filter((l) => !PW_CAUSE_RX.test(l) && PW_CONTEXT_RX.test(l));
+  const rest = all.filter((l) => !PW_CAUSE_RX.test(l) && !PW_CONTEXT_RX.test(l));
+  // ★ ORDER: first reason → what we aimed at → any FURTHER reasons → scaffolding.
+  //   Not "all reasons first": Playwright often reports the same overlay twice (once per intercepting
+  //   descendant), and two near-identical 150-char lines ate the whole budget, pushing out the
+  //   `locator resolved to <button …>` line — i.e. WHAT was being clicked, which the next reader needs
+  //   most when the anchor itself is under suspicion.
+  return { headline, lines: [...cause.slice(0, 1), ...context, ...cause.slice(1), ...rest] };
+}
+
+/** The REASON only, for a breadcrumb line (clearStep caps the whole line at 195 chars — keep this short).
+ *  Falls back to the headline when Playwright named no reason (e.g. a non-actionability error). */
+function actionCause(e: unknown, cap = 120): string {
+  const { headline, lines } = actionLogLines(e);
+  return pwLine(lines.find((l) => PW_CAUSE_RX.test(l)) ?? headline, cap);
+}
+
+/** Headline + reason-first call log, for the thrown error_message (the operator-facing record). */
+function actionFailure(e: unknown, cap = 460): string {
+  const { headline, lines } = actionLogLines(e);
+  const out: string[] = [headline];
+  // Fill in reason-first order and STOP at the cap, rather than concatenating everything and cutting the
+  // tail — so the budget is spent on whole, readable lines instead of half of one long one.
+  for (const l of lines) {
+    const next = pwLine(l);
+    if (out.join(' | ').length + next.length + 3 > cap) break;
+    out.push(next);
+  }
+  return out.join(' | ');
+}
+
 /** Best-effort dismiss the /cart cookie-consent banner ("Our website uses cookies… [Close]") that sits
  *  at the BOTTOM of the cart page and can intercept the ⋮ meatball click OR overlay the "Delete Items"
  *  confirm dialog. SCOPED to a cookie/consent container so it can NEVER dismiss the confirm modal itself
  *  (a generic page-wide "close" could). Prefers "Close" (the banner's actual control), then accept/got-it.
  *  Bounded, optional (no-op if absent), never throws. Returns a status the clear-cart telemetry logs:
- *  'absent' (no banner), 'dismissed' (banner present + close clicked), 'present' (present but no closer). */
-async function dismissCookieBanner(page: Page): Promise<'absent' | 'dismissed' | 'present'> {
+ *  'absent' (no banner), 'dismissed' (banner present + close clicked), 'present(<why>)' (present but the
+ *  close click FAILED — and now carrying Playwright's reason instead of just the bare word). */
+async function dismissCookieBanner(page: Page): Promise<string> {
   const banner = page
     .locator('[class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i], [aria-label*="cookie" i]')
     .filter({ visible: true })
@@ -1753,8 +1857,18 @@ async function dismissCookieBanner(page: Page): Promise<'absent' | 'dismissed' |
     .or(banner.getByRole('link', { name: /close|accept|got it|dismiss/i }))
     .filter({ visible: true })
     .first();
-  const clicked = await btn.click({ timeout: 1500 }).then(() => true).catch(() => false);
-  return clicked ? 'dismissed' : 'present';
+  // A banner we can SEE but cannot CLOSE is worth a reason: it is a prime suspect for intercepting the
+  // very clicks this step goes on to make, and "present" alone never said whether the closer was
+  // occluded, disabled or simply absent.
+  let why = 'no-closer';
+  const clicked = await btn
+    .click({ timeout: 1500 })
+    .then(() => true)
+    .catch((e: unknown) => {
+      why = actionCause(e, 90);
+      return false;
+    });
+  return clicked ? 'dismissed' : `present(${why})`;
 }
 
 /** ★ CLEAR-CART PER-SUBSTEP TELEMETRY (this PR). Emit one `CLEAR-STEP <label> <sub> <result> <detail>`
@@ -1798,7 +1912,12 @@ function isCartClearWrite(method: string, url: string, status: number): boolean 
  *  render 0x — the dropdown never opened for the runner's plain click, so "Empty My Cart" was never clickable
  *  (identical click-lands-but-handler-doesn't-fire bug as add-to-cart). Structural/booleans only; never
  *  throws (a strategy that throws — not actionable / no bbox — just falls through to the next). */
-async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 1800): Promise<string | null> {
+async function robustClickToOpen(
+  page: Page,
+  trigger: Loc,
+  opened: Loc,
+  armMs = 1800,
+): Promise<{ via: string | null; why: string }> {
   const RUNG_CLICK_TIMEOUT = 2200;
   const t = trigger.first();
   const strategies: Array<{ name: string; run: () => Promise<void> }> = [
@@ -1854,15 +1973,20 @@ async function robustClickToOpen(page: Page, trigger: Loc, opened: Loc, armMs = 
       },
     },
   ];
+  // ★ RUNG FAILURES ARE RECORDED, NOT DISCARDED. The old `catch { /* fall through */ }` meant a total
+  //   ladder failure reported only `via=NONE` — five strategies had each been told exactly why they
+  //   failed (occluded / no bbox / not stable) and every one of those answers was dropped. On success
+  //   `why` is unused, so a working ladder costs nothing; it only speaks when the ladder loses.
+  const rungWhy: string[] = [];
   for (const s of strategies) {
     try {
       await s.run();
-    } catch {
-      /* strategy threw (not actionable / no bbox) — fall through to the next rung */
+    } catch (e: unknown) {
+      rungWhy.push(`${s.name}:${actionCause(e, 70)}`);
     }
-    if (await appearsWithin(opened, armMs)) return s.name;
+    if (await appearsWithin(opened, armMs)) return { via: s.name, why: '' };
   }
-  return null;
+  return { via: null, why: rungWhy.join(' ; ').slice(0, 300) };
 }
 
 /** Teardown / baseline — clear the cart via the cart page's NATIVE "Empty My Cart" BULK action (⋮ menu),
@@ -1919,6 +2043,13 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       let remaining = -1;
       let initialCount = -1; // the N to clear (from the first attempt) — for CLEAR-SUMMARY
       let failedAt = 'unknown'; // the last sub-step that did not reach OK — for CLEAR-SUMMARY + the throw
+      // ★ Playwright's OWN reason for a failed click, kept instead of discarded (see actionLogLines).
+      //   `…Why` (short) goes in the breadcrumb line; `…Full` (headline + cause-first call log) is appended
+      //   to the thrown error_message, which is what runs.error_message and the alert actually show.
+      let emptyClickWhy = '';
+      let emptyClickFull = '';
+      let confirmClickWhy = '';
+      let confirmClickFull = '';
       const crumbs: string[] = []; // accumulate the CLEAR-STEP lines → thrown error_message carries the breadcrumb
       const crumb = async (sub: string, result: string, detail = '') => {
         crumbs.push(await clearStep(page, label, sub, result, detail));
@@ -2009,27 +2140,51 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
         //    click-strategy ladder, treating "Empty My Cart" becoming visible as the open signal, up to 3 tries.
         failedAt = 'MENU-OPEN';
         let openedVia: string | null = null;
+        let openWhy = ''; // ★ why the LADDER lost, when it does — was `via=NONE` and nothing else
         for (let openTry = 0; openTry < 3 && openedVia === null; openTry++) {
           if (!(await meatball.isVisible({ timeout: 4000 }).catch(() => false))) {
             await dismissInterstitials(page); // meatball not found this round — clear overlays, re-probe
             await dismissCookieBanner(page);
             continue;
           }
-          openedVia = await robustClickToOpen(page, meatball, emptyItem, 1800);
+          const opened = await robustClickToOpen(page, meatball, emptyItem, 1800);
+          openedVia = opened.via;
+          if (opened.via === null) openWhy = opened.why;
         }
         const menuOpen = openedVia !== null && (await isVisibleSafe(emptyItem));
-        await crumb('MENU-OPEN', menuOpen ? 'OK' : 'FAIL', `${tag} menuOpen=${menuOpen ? 'y' : 'n'} via=${openedVia ?? 'NONE'}`);
+        await crumb(
+          'MENU-OPEN',
+          menuOpen ? 'OK' : 'FAIL',
+          `${tag} menuOpen=${menuOpen ? 'y' : 'n'} via=${openedVia ?? 'NONE'}${openWhy ? ` why=${openWhy}` : ''}`,
+        );
 
         if (menuOpen) {
           // ── SUB-STEP 6: EMPTY-CLICKED — click "Empty My Cart" (the trash-icon dropdown item). ───────────
           failedAt = 'EMPTY-CLICKED';
-          const emptyClicked = await emptyItem.click({ timeout: 4000 }).then(() => true).catch(() => false);
+          // ★★ THE ONE THAT COST A TRACE DOWNLOAD. This click's error carried
+          //    "<a class='menu-link'>Seafood</a> from <header role='banner'> subtree intercepts pointer
+          //    events" after 12 retries — the whole answer — and `.catch(() => false)` dropped it, leaving
+          //    `clicked=n`. The run then reported failedAt=SERVER-PERSIST, sending the reader at the API.
+          //    ★ TOLERANCE UNCHANGED: a click that errors but whose effect still lands (the confirm dialog
+          //      appears) still passes — DIALOG-APPEARED remains the gate. Only the DIAGNOSIS improves.
+          const emptyClicked = await emptyItem
+            .click({ timeout: 4000 })
+            .then(() => true)
+            .catch((e: unknown) => {
+              emptyClickWhy = actionCause(e);
+              emptyClickFull = actionFailure(e);
+              return false;
+            });
           // ★ DELIBERATELY NO broad dismissInterstitials() here (#91). It clicks ANY visible close/dismiss/
           //   continue button and can CLOSE the "Delete Items" confirm dialog before we click "Yes, delete
           //   items" — a prime suspect for "menu opens but cart stays 5" (the confirm auto-dismissed). The
           //   only overlay that legitimately needs clearing between the empty-click and the confirm is the
           //   cookie banner, handled by the SCOPED dismissCookieBanner in SUB-STEP 7 below.
-          await crumb('EMPTY-CLICKED', emptyClicked ? 'OK' : 'FAIL', `${tag} clicked=${emptyClicked ? 'y' : 'n'}`);
+          await crumb(
+            'EMPTY-CLICKED',
+            emptyClicked ? 'OK' : 'FAIL',
+            `${tag} clicked=${emptyClicked ? 'y' : 'n'}${emptyClickWhy ? ` why=${emptyClickWhy}` : ''}`,
+          );
 
           // ── SUB-STEP 7: DIALOG-APPEARED — did the "Delete Items" confirm dialog render? Live screenshots:
           //    title "Delete Items", PRIMARY button EXACTLY "Yes, delete items" (red), secondary "Cancel".
@@ -2068,9 +2223,23 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
             const delRespPromise = page
               .waitForResponse((r) => isCartClearWrite(r.request().method(), r.url(), r.status()), { timeout: 6000 })
               .catch(() => null);
-            const confirmClicked = await confirmBtn.click({ timeout: 4000 }).then(() => true).catch(() => false);
+            // ★ Same treatment as EMPTY-CLICKED, and for the same reason: DELETE-FIRED below reports
+            //   "writes=0", which reads as an API/handler problem even when the truth is that the confirm
+            //   button was never successfully clicked. Tolerance unchanged — DELETE-FIRED is still the gate.
+            const confirmClicked = await confirmBtn
+              .click({ timeout: 4000 })
+              .then(() => true)
+              .catch((e: unknown) => {
+                confirmClickWhy = actionCause(e);
+                confirmClickFull = actionFailure(e);
+                return false;
+              });
             await dismissInterstitials(page); // safe now — the confirm has been clicked / dialog actioned
-            await crumb('CONFIRM-CLICKED', confirmClicked ? 'OK' : 'FAIL', `${tag} clicked=${confirmClicked ? 'y' : 'n'}`);
+            await crumb(
+              'CONFIRM-CLICKED',
+              confirmClicked ? 'OK' : 'FAIL',
+              `${tag} clicked=${confirmClicked ? 'y' : 'n'}${confirmClickWhy ? ` why=${confirmClickWhy}` : ''}`,
+            );
 
             // ── SUB-STEP 9: DELETE-FIRED — did a cart-clear/delete NETWORK write fire after the confirm? ──
             //    The wait was armed before the click; read what the listener saw once it settles.
@@ -2108,13 +2277,26 @@ async function clearCart(page: Page, label = 'clear-cart (teardown)'): Promise<v
       //   the count held — the server accepted the delete but didn't persist it (a different bug class than
       //   any client-side break; route the fix at the API, not the UI flow).
       if (failedAt === 'FINAL-COUNT' && clearWrites.length > 0) failedAt = 'SERVER-PERSIST';
+      // ★★ THE CLICK REASON OUTRANKS THE SUB-STEP LABEL. Run 1145685 reported `failedAt=SERVER-PERSIST`
+      //    — "the server accepted the delete but didn't persist it" — while a click had in fact never
+      //    landed because the site header was over the button. A label describes WHERE the flow stopped;
+      //    this describes WHY, and when both exist the WHY is what the operator needs first, so it is
+      //    appended to the thrown message rather than left in the trace for someone to go dig out.
+      const clickWhy = [
+        emptyClickFull ? `EMPTY-CLICK: ${emptyClickFull}` : '',
+        confirmClickFull ? `CONFIRM-CLICK: ${confirmClickFull}` : '',
+      ]
+        .filter(Boolean)
+        .join(' ;; ');
       const summary = await clearStep(page, label, 'SUMMARY', 'FAIL', `failedAt=${failedAt} initial=${initialCount} final=${remaining} attempts=${MAX_ATTEMPTS}`);
       const d = await captureStepDiag(page, label).catch(() => ({ full: '', compact: '' }));
       console.log(`[full-shop-flow] STEP-FAIL ${label} DIAG ${d.full}`);
       if (d.compact) await page.evaluate((m) => console.warn(m), d.compact).catch(() => {});
       throw new Error(
         `${d.compact} :: ${summary} :: BREADCRUMB=[ ${crumbs.join(' | ')} ] :: ${label}: cart NOT empty ` +
-          `(residual=${remaining}) after ${MAX_ATTEMPTS} "Empty My Cart" attempts — failing sub-step: ${failedAt}.`,
+          `(residual=${remaining}) after ${MAX_ATTEMPTS} "Empty My Cart" attempts — failing sub-step: ${failedAt}.` +
+          // Placed LAST so it is the final thing read, and prefixed so it cannot be mistaken for the label.
+          (clickWhy ? ` ★ A CLICK NEVER LANDED — Playwright's reason (outranks the sub-step label above): ${clickWhy}` : ''),
       );
     } finally {
       page.off('response', onClearResp);
