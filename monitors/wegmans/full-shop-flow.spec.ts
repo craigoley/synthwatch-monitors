@@ -447,6 +447,51 @@ function cartSkusFromBody(body: unknown): string[] | null {
   return skus;
 }
 
+/** What the cart read actually did — the three distinguishable outcomes behind "serverCartSkus is null". */
+export interface CartReadOutcome {
+  /** A GET …/commerce/cart/carts 2xx was matched by waitForResponse. */
+  readMatched: boolean;
+  /** First line of the error `.json()` threw, or null if it did not throw. */
+  parseError: string | null;
+  /** Top-level keys of the parsed body, or null if we never got to parse one. */
+  bodyKeys: string[] | null;
+}
+
+/**
+ * Why no server cart state is available — as one of THREE distinct findings, each naming a different
+ * next action: chase the REQUEST, chase the TRANSPORT, or chase the CONTRACT.
+ *
+ * ★ THE BUG THIS REPLACES: all three collapsed into one message that ASSERTED the third — "The API
+ *   response shape may have changed" — while the evidence that would have settled it was discarded by a
+ *   bare `catch {}`. Run 1146366 was diagnosed by downloading an 8 MB trace to establish something the
+ *   run already knew and had thrown away. Fourth appearance of the swallowed-error class (#127, #130,
+ *   the clear-cart clicks, this).
+ *
+ * ★★ NEVER ASSERT A SHAPE CHANGE WITHOUT HAVING SEEN THE SHAPE. The shape-change branch is the ONLY one
+ *   that may say so, and it prints the top-level keys it saw as the evidence. Keys are NAMES, never
+ *   values — this string reaches runs.error_message.
+ */
+export function noCartStateReason(o: CartReadOutcome): string {
+  if (!o.readMatched) {
+    return (
+      `no cart read matched — no GET …/commerce/cart/carts returned 2xx within the step budget, so the ` +
+      `REQUEST is what to look at (did it fire at all? different host/path? aborted at status -1 the way ` +
+      `the add POSTs do?)`
+    );
+  }
+  if (o.parseError !== null) {
+    return (
+      `read matched but the body did not parse: ${o.parseError}. The request is fine; the TRANSPORT or ` +
+      `the read is not (body consumed by a navigation, non-JSON payload, truncated response)`
+    );
+  }
+  return (
+    `body parsed but carried no cartData[].lineItems — top-level keys were ` +
+    `[${(o.bodyKeys ?? []).join(', ')}]. THIS is the shape-change case, and those keys are the evidence ` +
+    `for it`
+  );
+}
+
 /** The SKU a product-detail URL identifies: `/shop/product/92685-Bananas-Sold-by` → `"92685"`.
  *  ★ Confirmed against the cart API in the recon: the PDP slug's leading number IS the cart lineItem
  *  sku (55066 milk / 46155 eggs / 60715 bread / 92685 bananas). This is how a run learns what it added
@@ -742,7 +787,22 @@ async function captureStepDiag(page: Page, stepName: string): Promise<{ full: st
   const b = (v: boolean) => (v ? '1' : '0');
   const loggedIn = await isVisibleSafe(loggedInAffordance(page));
   const signInFormPresent = await isVisibleSafe(page.locator('#signInName, #password'));
-  const cartPresent = await isVisibleSafe(page.locator('[class*="cart" i], [data-testid*="cart" i]').first());
+  // ★★ THE SAME ANCHORS GATE 1 ASSERTS ON — not a substring match on "cart".
+  //    It was `[class*="cart" i], [data-testid*="cart" i]` + .first() + no visible filter, which
+  //    (a) matches ANY element whose class merely CONTAINS "cart" — cart-item-count, add-to-cart-button,
+  //        a cart-shaped icon wrapper — and (b) `.first()` then pins whichever of those is first in DOM
+  //        order, visible or not. OBSERVED 2026-08-05 run 1146366: the diag reported `cart0`
+  //        (cartPresent:false) on a run where GATE 1 — using the scoped anchors below — PASSED. A
+  //        diagnostic that contradicts the assertion it sits next to sends the reader hunting a render
+  //        failure that did not happen.
+  //    ★ THIRD APPEARANCE of the loose-selector trap in this fleet: the Meals2Go promo hijack (#129,
+  //      an aria-label containing "cheese" won `.first()`), the `li[class*="item" i]` cart-row count
+  //      (`tw:items-center` contains "item", 288 false rows), and now this. The pattern each time is a
+  //      SUBSTRING match plus `.first()` with nothing pinning WHICH element is meant. Reuse the anchor
+  //      the assertion uses; do not re-derive a looser one for the diagnostic.
+  const cartPresent = await isVisibleSafe(
+    page.locator(CART_LIST_SEL).or(page.locator(CART_ROW_SEL)).or(page.getByText(CART_EMPTY_RX)),
+  );
   const checkoutPresent = await isVisibleSafe(
     page.getByRole('button', { name: /checkout|proceed/i }).or(page.locator('[class*="checkout" i]')),
   );
@@ -1373,13 +1433,27 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       //   Playwright discards response bodies on navigation, and a deferred read across a navigation is
       //   the exact defect #121 fixed. Captured into a LOCAL and deliberately NOT promoted to
       //   serverCartSkus yet: a capture is not a claim, and no cart-contents claim may precede GATE 1.
+      // ★★ RECORD WHICH OF THE THREE STATES WE ARE IN. "readSkus is null" had three distinct causes —
+      //    no response matched / the body did not parse / it parsed but carried no lineItems — and GATE 2
+      //    collapsed them into one message that ASSERTED the third ("The API response shape may have
+      //    changed"). That is a guess presented as a finding, and the evidence that would settle it was
+      //    thrown away by a bare `catch {}`. Run 1146366 was diagnosed by downloading an 8 MB trace to
+      //    establish something the run already knew. Same class as #127/#130 — fourth appearance.
       const cartResp = await cartRead;
       let readSkus: string[] | null = null;
+      let readMatched = false;
+      let parseError: string | null = null;
+      let bodyKeys: string[] | null = null;
       if (cartResp) {
+        readMatched = true;
         try {
-          readSkus = cartSkusFromBody(await cartResp.json());
-        } catch {
-          /* unreadable body → stays null → GATE 2 reports it honestly */
+          const body: unknown = await cartResp.json();
+          // ★ The TOP-LEVEL KEYS, captured BEFORE we judge the shape — so a shape claim is only ever made
+          //   with the shape in hand. Names only, never values: this string reaches error_message.
+          bodyKeys = body && typeof body === 'object' ? Object.keys(body as Record<string, unknown>) : [];
+          readSkus = cartSkusFromBody(body);
+        } catch (e: unknown) {
+          parseError = (e instanceof Error ? e.message : String(e)).split('\n')[0].slice(0, 140);
         }
       }
 
@@ -1426,12 +1500,15 @@ test('Wegmans: full authenticated pickup shopping flow', async ({ page }) => {
       // ★ The assertion below is UNCHANGED. It worked — it failed loudly with the true condition instead of
       //   passing on absent evidence. The read was fixed, not the gate.
       const serverSkus: string[] | null = serverCartSkus;
+      // ★★ THREE STATES, THREE MESSAGES — and NEVER assert a shape change without having seen the shape.
+      //    Each names a different next action: chase the request, chase the transport, or chase the
+      //    contract. The old single message sent every reader after the third regardless.
+      const noCartStateWhy = noCartStateReason({ readMatched, parseError, bodyKeys });
       expect(
         serverSkus,
         cartWriteSeen
-          ? `verify-cart-4: cart write(s) fired but none returned a parseable cart body ` +
-            `(cartData[].lineItems). MEASURED: no server cart state available for this run, so cart ` +
-            `contents were not verified. The API response shape may have changed.`
+          ? `verify-cart-4: cart write(s) fired but no server cart state is available for this run, so ` +
+            `cart contents were not verified. MEASURED: ${noCartStateWhy}.`
           : `verify-cart-4: no cart write was observed during the add steps. MEASURED: no server cart ` +
             `state available for this run, so cart contents were not verified.`,
       ).toBeTruthy();
