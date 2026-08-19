@@ -67,7 +67,7 @@ test('Authorized user add to cart and empty', async ({ page }) => {
     expect(
       await tokenEvent,
       'login: no B2C token-acquisition event within 45s of submit — auth did not complete',
-    ).not.toBeNull();
+    ).toBeTruthy();
 
     // Wait for redirect back to main site and greeting to appear (60s ceiling — free unless hit)
     await expect(
@@ -83,69 +83,73 @@ test('Authorized user add to cart and empty', async ({ page }) => {
       `${process.env.BASE_URL ?? 'https://www.wegmans.com'}/shop/search?query=${encodeURIComponent(query)}`,
       { waitUntil: 'domcontentloaded' },
     );
-    const addToCartButton = page
-      .getByRole('button', { name: /add\b.*\bto cart\b/i })
-      .or(page.locator('button[aria-label*="to cart" i]'))
+    // In Store mode: the add button is a "+" icon on the product card (not labelled "Add to Cart")
+    const addButton = page
+      .getByRole('button', { name: /add\b.*\bto (cart|list)\b|^add$|^\+$/i })
+      .or(page.locator('button[aria-label*="to cart" i], button[aria-label*="to list" i], button[aria-label*="add" i][class*="add" i], button[class*="add-button" i]'))
       .filter({ visible: true })
       .first();
-    await expect(addToCartButton).toBeVisible({ timeout: 30_000 });
+    await expect(addButton).toBeVisible({ timeout: 30_000 });
   });
 
-  await step('Add item to cart', async () => {
-    const addToCartButton = page
-      .getByRole('button', { name: /add\b.*\bto cart\b/i })
-      .or(page.locator('button[aria-label*="to cart" i]'))
+  await step('Add item to list', async () => {
+    const addButton = page
+      .getByRole('button', { name: /add\b.*\bto (cart|list)\b|^add$|^\+$/i })
+      .or(page.locator('button[aria-label*="to cart" i], button[aria-label*="to list" i], button[aria-label*="add" i][class*="add" i], button[class*="add-button" i]'))
       .filter({ visible: true })
       .first();
 
-    const cartWrite = page.waitForResponse(
+    // Wait for the list/cart mutation API to respond
+    const listWrite = page.waitForResponse(
       (r) => {
         const m = r.request().method();
         if (m === 'GET' || m === 'HEAD') return false;
         try {
           const host = new URL(r.url()).hostname.toLowerCase();
-          const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host);
-          return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add)/i.test(r.url()) && r.status() < 500;
+          const onWegmansApi = /(^|\.)wegmans\.(com|cloud)$/.test(host) || /wegapi|kitting/i.test(host) || /azure-api\.net$/.test(host);
+          return onWegmansApi && /\/(cart|basket|cart-items|line-?items|order|add|list|shopping-?list|items)/i.test(r.url()) && r.status() < 500;
         } catch {
           return false;
         }
       },
-      { timeout: 20_000 },
+      { timeout: 30_000 },
     );
 
-    await addToCartButton.click();
-    await cartWrite;
+    await addButton.click();
+    await listWrite;
   });
 
-  await step('Open cart and verify item', async () => {
-    await page.goto((process.env.BASE_URL ?? 'https://www.wegmans.com') + '/cart', {
+  await step('Open list and verify item', async () => {
+    await page.goto((process.env.BASE_URL ?? 'https://www.wegmans.com') + '/my-list', {
       waitUntil: 'domcontentloaded',
     });
 
-    // "My Cart is empty" must NOT appear — its absence proves we have items
+    // "Empty My List" toolbar action only appears when the list has items — proves add succeeded
     await expect(
-      page.getByText(/my cart is empty/i),
-      'cart: page shows "My Cart is empty" after add-to-cart — item was not added',
-    ).not.toBeVisible({ timeout: 30_000 });
+      page.getByRole('link', { name: /empty my list/i })
+        .or(page.getByRole('button', { name: /empty my list/i }))
+        .or(page.getByText(/empty my list/i))
+        .first(),
+      'list: "Empty My List" not visible — item may not have been added',
+    ).toBeVisible({ timeout: 30_000 });
   });
 
-  await step('Empty the cart', async () => {
-    // "Empty My Cart" appears as a toolbar action on /cart — may be link, button, or clickable text
-    const emptyCart = page
-      .getByRole('link', { name: /empty my cart/i })
-      .or(page.getByRole('button', { name: /empty my cart/i }))
-      .or(page.getByText(/empty my cart/i))
+  await step('Empty the list', async () => {
+    // "Empty My List" appears as a toolbar action on /my-list
+    const emptyList = page
+      .getByRole('link', { name: /empty my list/i })
+      .or(page.getByRole('button', { name: /empty my list/i }))
+      .or(page.getByText(/empty my list/i))
       .filter({ visible: true })
       .first();
-    await expect(emptyCart, 'cart: "Empty My Cart" action not visible on the cart page').toBeVisible({ timeout: 30_000 });
-    await emptyCart.click();
+    await expect(emptyList, 'list: "Empty My List" action not visible on the list page').toBeVisible({ timeout: 30_000 });
+    await emptyList.click();
 
     // The site may show a confirm dialog OR empty immediately — handle both
     const confirmButton = page
       .getByRole('button', { name: /yes,?\s*delete items|confirm/i })
       .filter({ visible: true })
       .first();
-    const emptyState = page.getByText(/my cart is empty/i);
 
     const confirmAppeared = await confirmButton
       .waitFor({ state: 'visible', timeout: 5_000 })
@@ -156,10 +160,12 @@ test('Authorized user add to cart and empty', async ({ page }) => {
       await confirmButton.click();
     }
 
-    // Assert the cart is empty
+    // Assert the list is empty — "Your list is empty" text or "Get it (0)" tab
     await expect(
-      emptyState,
-      'cart: "My Cart is empty" did not appear after emptying the cart',
+      page.getByText(/your list is empty/i)
+        .or(page.getByText(/get it \(0\)/i))
+        .first(),
+      'list: list was not emptied after confirming deletion',
     ).toBeVisible({ timeout: 30_000 });
   });
 });
