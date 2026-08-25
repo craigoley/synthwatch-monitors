@@ -67,29 +67,51 @@ test('Meal and Recipes empty cart and sign out Terraform flow', async ({ page })
     await login(page, username, password);
   });
 
-  await step('Open meals and recipes and select recipe', async () => {
+  await step('Open Meals and Recipes', async () => {
     const mealsAndRecipes = page
-      .getByRole('link', { name: /meals\s*&?\s*recipes/i })
-      .or(page.getByRole('button', { name: /meals\s*&?\s*recipes/i }))
-      .filter({ visible: true })
+      .getByRole('link', { name: /meals (&|and) recipes/i })
+      .or(page.getByRole('button', { name: /meals (&|and) recipes/i }))
       .first();
-    await expect(mealsAndRecipes).toBeVisible({ timeout: 30_000 });
+    await expect(
+      mealsAndRecipes,
+      'the "Meals & Recipes" nav entry did not render on the homepage.',
+    ).toBeVisible({ timeout: 30_000 });
     await mealsAndRecipes.click();
+    await dismissInterstitials(page);
+  });
 
-    const under30 = page
-      .getByRole('link', { name: /ready in under 30 minutes/i })
-      .or(page.getByRole('button', { name: /ready in under 30 minutes/i }))
-      .filter({ visible: true })
-      .first();
-    await expect(under30).toBeVisible({ timeout: 30_000 });
-    await under30.click();
+  await step('Open the Under 30 Minutes recipe category', async () => {
+    // The TF clickpath clicked the "Ready in Under 30 Minutes" category tile by DOM position.
+    // Two things make that unusable here: the live tile is captioned "Under 30 Minutes" (NOT
+    // "Ready in ..."), and it is a lazily rendered <figure> inside the Time tab panel, so both a
+    // name match and a positional match are brittle. Its href IS the stable contract --
+    // /recipes/search?totalTime=30 -- so navigate it directly (same direct-URL lesson as
+    // recipe-search.spec.ts, which avoids the autocomplete/tab-panel races entirely).
+    await page.goto(`${process.env.BASE_URL ?? 'https://www.wegmans.com'}/recipes/search?totalTime=30`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await dismissInterstitials(page);
+  });
 
+  await step('Open the first recipe', async () => {
+    // Repo-proven card anchor (recipe-nav.spec.ts / recipe-search.spec.ts): a result card is a
+    // link wrapping an <img data-testid="img-recipe-card">. Recipe-agnostic, so catalog
+    // reordering cannot break it, and it excludes curated collection tiles + nav/filter links
+    // that the old `a:has(img)` selector would have matched first.
     const firstRecipe = page
-      .locator('a:has(img), a:has([class*="recipe-card-image" i])')
-      .filter({ visible: true })
+      .getByRole('link')
+      .filter({ has: page.getByTestId('img-recipe-card') })
       .first();
-    await expect(firstRecipe).toBeVisible({ timeout: 30_000 });
+    await expect(
+      firstRecipe,
+      'no recipe cards rendered on /recipes/search?totalTime=30 -- suspect ENTRY-ROT in that ' +
+        'category URL before concluding recipe browse is down.',
+    ).toBeVisible({ timeout: 30_000 });
     await firstRecipe.click();
+
+    // A recipe DETAIL page is /recipes/<category>/<slug> (two segments) -- distinguishes it from
+    // the listing, so a click that silently no-ops reds HERE instead of in the add-to-list step.
+    await expect(page).toHaveURL(/\/recipes\/[a-z][a-z0-9-]*\/[a-z0-9-]+/i, { timeout: 30_000 });
   });
 
   await step('Add recipe ingredients to list', async () => {
