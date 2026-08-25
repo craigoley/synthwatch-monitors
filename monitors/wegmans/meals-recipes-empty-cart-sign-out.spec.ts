@@ -120,9 +120,15 @@ test('Meal and Recipes empty cart and sign out Terraform flow', async ({ page })
       .or(page.getByRole('button', { name: /add selected items to list/i }))
       .filter({ visible: true })
       .first();
-    await expect(addSelected).toBeVisible({ timeout: 30_000 });
-    await addSelected.click();
+    await expect(
+      addSelected,
+      'the recipe detail page exposes no "Add Selected Items to My List" action.',
+    ).toBeVisible({ timeout: 30_000 });
 
+    // ARM BEFORE THE CLICK. The list write can fire on THIS click (when the recipe commits its
+    // ingredients directly) or on the confirm click in the follow-up modal -- we cannot know which
+    // until it happens. Arming after the first click loses the direct-commit case entirely and the
+    // await below would then burn its full 30s and red a step that actually succeeded.
     const listWrite = page.waitForResponse(
       (r) => {
         if (['GET', 'HEAD'].includes(r.request().method())) return false;
@@ -137,6 +143,9 @@ test('Meal and Recipes empty cart and sign out Terraform flow', async ({ page })
       { timeout: 30_000 },
     );
 
+    await addSelected.click();
+
+    // The modal is OPTIONAL (best-effort): some recipes commit on the first click and never show it.
     const confirmAdd = page
       .getByRole('button', { name: /add selected items to list/i })
       .filter({ visible: true })
@@ -147,7 +156,13 @@ test('Meal and Recipes empty cart and sign out Terraform flow', async ({ page })
       .catch(() => false);
     if (confirmVisible) await confirmAdd.click();
 
-    await listWrite;
+    // Assert the MUTATION API, not a DOM toast/badge -- toasts are unreliable headless.
+    const write = await listWrite;
+    expect(
+      write,
+      'no list-mutation write was observed within 30s of adding the recipe ingredients -- the add ' +
+        'did not commit (the later "Empty My List" step would otherwise red misleadingly).',
+    ).toBeTruthy();
   });
 
   await step('Open list and empty it', async () => {
