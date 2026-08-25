@@ -241,6 +241,54 @@
       ]
     },
     {
+      "id": "wegmans-checkout-terraform",
+      "name": "Wegmans Checkout Terraform",
+      "script": "monitors/wegmans/checkout-terraform.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "checkout", "journey", "disabled"],
+      "description": "Authenticated checkout path translated from Dynatrace TF: login, choose pickup context, open cart, continue to checkout, and verify checkout progresses to payment.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-meals-recipes-empty-cart-sign-out",
+      "name": "Wegmans Meal and Recipes Empty Cart and Sign Out Terraform",
+      "script": "monitors/wegmans/meals-recipes-empty-cart-sign-out.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "recipes", "list", "signout", "journey", "disabled"],
+      "description": "Authenticated Meals & Recipes flow translated from Dynatrace TF: open recipes, add selected recipe items to list, empty list, and sign out.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-verify-add-card-modal",
+      "name": "Wegmans Verify Add Card Modal Terraform",
+      "script": "monitors/wegmans/verify-add-card-modal.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "checkout", "payment", "journey", "disabled"],
+      "description": "Authenticated payment setup flow translated from Dynatrace TF: open checkout, continue to payment, open Add New Card modal, and verify card iframe is available.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
       "id": "wegmans-search-product-preview",
       "name": "Wegmans commerce PREVIEW: search → product (pre-prod regression)",
       "script": "monitors/wegmans/search-product.spec.ts",
