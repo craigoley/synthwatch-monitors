@@ -184,12 +184,21 @@
     },
     {
       "id": "wegmans-b2c-login-test",
-      "name": "Wegmans B2C login — InfoSec on-demand unblock test",
+      "name": "Wegmans B2C login \u2014 InfoSec on-demand unblock test",
       "script": "monitors/wegmans/b2c-login-test.spec.ts",
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
-      "tags": ["wegmans", "b2c", "login", "auth", "infosec", "on-demand", "test-instrument", "disabled"],
-      "description": "★ InfoSec ON-DEMAND TEST INSTRUMENT (ships DISABLED; Craig fires it from the allowlisted egress) — NOT a cron health monitor. Logs into wegmans.com B2C (myaccount.wegmans.com, #signInName/#password → SelfAsserted, policy B2C_1A_…WithPhoneVerification) with the InfoSec-sanctioned Vercel bypass header as the Akamai+Vercel discriminator (allowlisted IP + header = past the bot wall). CLASSIFIES the outcome: COMPLETED / OTP_GATED / BOT_BLOCKED (Akamai blocked DESPITE header+allowlist — actionable) / INCONCLUSIVE_HEADER_DROPPED (header didn't ride the B2C nav — our bug) / OTHER. The header is injected host-scoped to myaccount.wegmans.com by the spec (the runner's PROTECTED_BYPASS_HOSTS omits that host — the runner gap the spec compensates for). sensitive=true: real test-account login; redact_patterns + the built-in denylist scrub Bearer/JWT/B2C-session values from trace_signals. Green only when the login COMPLETES.",
+      "tags": [
+        "wegmans",
+        "b2c",
+        "login",
+        "auth",
+        "infosec",
+        "on-demand",
+        "test-instrument",
+        "disabled"
+      ],
+      "description": "\u2605 InfoSec ON-DEMAND TEST INSTRUMENT (ships DISABLED; Craig fires it from the allowlisted egress) \u2014 NOT a cron health monitor. Logs into wegmans.com B2C (myaccount.wegmans.com, #signInName/#password \u2192 SelfAsserted, policy B2C_1A_\u2026WithPhoneVerification) with the InfoSec-sanctioned Vercel bypass header as the Akamai+Vercel discriminator (allowlisted IP + header = past the bot wall). CLASSIFIES the outcome: COMPLETED / OTP_GATED / BOT_BLOCKED (Akamai blocked DESPITE header+allowlist \u2014 actionable) / INCONCLUSIVE_HEADER_DROPPED (header didn't ride the B2C nav \u2014 our bug) / OTHER. The header is injected host-scoped to myaccount.wegmans.com by the spec (the runner's PROTECTED_BYPASS_HOSTS omits that host \u2014 the runner gap the spec compensates for). sensitive=true: real test-account login; redact_patterns + the built-in denylist scrub Bearer/JWT/B2C-session values from trace_signals. Green only when the login COMPLETES.",
       "target": "https://www.wegmans.com",
       "enabledByDefault": false,
       "sensitive": true,
@@ -262,7 +271,15 @@
       "script": "monitors/wegmans/meals-recipes-empty-cart-sign-out.spec.ts",
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
-      "tags": ["wegmans", "auth", "recipes", "list", "signout", "journey", "disabled"],
+      "tags": [
+        "wegmans",
+        "auth",
+        "recipes",
+        "list",
+        "signout",
+        "journey",
+        "disabled"
+      ],
       "description": "Authenticated Meals & Recipes flow translated from Dynatrace TF: open recipes, add selected recipe items to list, empty list, and sign out.",
       "target": "https://www.wegmans.com",
       "enabledByDefault": false,
@@ -290,12 +307,20 @@
     },
     {
       "id": "wegmans-search-product-preview",
-      "name": "Wegmans commerce PREVIEW: search → product (pre-prod regression)",
+      "name": "Wegmans commerce PREVIEW: search \u2192 product (pre-prod regression)",
       "script": "monitors/wegmans/search-product.spec.ts",
       "kind": "browser",
       "suggestedIntervalSeconds": 1800,
-      "tags": ["wegmans", "commerce", "preview", "pre-prod", "regression", "search", "disabled"],
-      "description": "★ PRE-PROD REGRESSION CHECK (ships DISABLED; Craig enables after one verified-clean on-demand run from the allowlisted egress). REUSES the prod search-product spec unchanged (S2 host-rewrite, zero spec churn): the runner rewrites the spec's hardcoded rewrite_from_origin (https://www.wegmans.com) to this check's target origin (https://preview.commerce.wegmans.com) at the route layer, and injects the Vercel bypass header + x-vercel-set-bypass-cookie for the preview host (#215). environment=staging → EXCLUDED from prod slo/mttr/trust (API #188), INCLUDED in region-health/egress, so it can never pollute prod fleet numbers. ★ ROUTE-MISMATCH RISK (Craig-accepted): search-product targets the www.wegmans.com storefront app, not the commerce app — /shop/search may not exist on the commerce preview; a red here is expected until validated on-demand and is why it ships disabled. sensitive=false: anonymous search/browse, no login/Bearer/PII. Requires runner PRs #215 + #216 deployed before it runs.",
+      "tags": [
+        "wegmans",
+        "commerce",
+        "preview",
+        "pre-prod",
+        "regression",
+        "search",
+        "disabled"
+      ],
+      "description": "\u2605 PRE-PROD REGRESSION CHECK (ships DISABLED; Craig enables after one verified-clean on-demand run from the allowlisted egress). REUSES the prod search-product spec unchanged (S2 host-rewrite, zero spec churn): the runner rewrites the spec's hardcoded rewrite_from_origin (https://www.wegmans.com) to this check's target origin (https://preview.commerce.wegmans.com) at the route layer, and injects the Vercel bypass header + x-vercel-set-bypass-cookie for the preview host (#215). environment=staging \u2192 EXCLUDED from prod slo/mttr/trust (API #188), INCLUDED in region-health/egress, so it can never pollute prod fleet numbers. \u2605 ROUTE-MISMATCH RISK (Craig-accepted): search-product targets the www.wegmans.com storefront app, not the commerce app \u2014 /shop/search may not exist on the commerce preview; a red here is expected until validated on-demand and is why it ships disabled. sensitive=false: anonymous search/browse, no login/Bearer/PII. Requires runner PRs #215 + #216 deployed before it runs.",
       "target": "https://preview.commerce.wegmans.com",
       "rewrite_from_origin": "https://www.wegmans.com",
       "environment": "staging",
@@ -308,8 +333,18 @@
       "script": "monitors/wegmans/full-shop-flow.spec.ts",
       "kind": "browser",
       "suggestedIntervalSeconds": 900,
-      "tags": ["wegmans", "shop", "pickup", "cart", "checkout", "authenticated", "sensitive", "journey", "disabled"],
-      "description": "★ FULL AUTHENTICATED PICKUP SHOPPING FLOW (SENSITIVE; ships DISABLED; on-demand validation first). Labeled steps: login → search+add milk/eggs/bread/bananas → verify 4 in cart → checkout as PICKUP → timeslots render + selectable → select a slot (SAFE: Craig-confirmed no capacity hold until order placement; the monitor NEVER places the order) → clear cart → logout. TEARDOWN (clear-cart + logout) runs in a finally so a failed run never leaves a dirty cart / live session for the next run. CONCURRENCY = option 3 (offset cron per region — dashboard-owned config: eastus2 :00/:30, centralus :15/:45, NOT westus2) + a HARD in-spec run-cap so a slow run can't bleed into the next same-region tick and corrupt the shared account. REUSES proven selectors (login+LOGGED_IN_AFFORDANCE_RX from b2c-login-test #52/#60; search+first-result from search-product; redaction/diag from #57/#59). ★ NET-NEW authenticated selectors (add-to-cart/cart/checkout/pickup/timeslot/clear-cart/logout) are resilient but NOT yet live-verified — each failing step emits a structural OTHER-DIAG so the FIRST sandbox fire verifies/corrects them. sensitive=true: real login; redact_patterns + the built-in denylist scrub Bearer/JWT/B2C-session. ★ DO NOT SCHEDULE until every step is proven green + clean-teardown across several on-demand fires and Craig sets cadence/region posture.",
+      "tags": [
+        "wegmans",
+        "shop",
+        "pickup",
+        "cart",
+        "checkout",
+        "authenticated",
+        "sensitive",
+        "journey",
+        "disabled"
+      ],
+      "description": "\u2605 FULL AUTHENTICATED PICKUP SHOPPING FLOW (SENSITIVE; ships DISABLED; on-demand validation first). Labeled steps: login \u2192 search+add milk/eggs/bread/bananas \u2192 verify 4 in cart \u2192 checkout as PICKUP \u2192 timeslots render + selectable \u2192 select a slot (SAFE: Craig-confirmed no capacity hold until order placement; the monitor NEVER places the order) \u2192 clear cart \u2192 logout. TEARDOWN (clear-cart + logout) runs in a finally so a failed run never leaves a dirty cart / live session for the next run. CONCURRENCY = option 3 (offset cron per region \u2014 dashboard-owned config: eastus2 :00/:30, centralus :15/:45, NOT westus2) + a HARD in-spec run-cap so a slow run can't bleed into the next same-region tick and corrupt the shared account. REUSES proven selectors (login+LOGGED_IN_AFFORDANCE_RX from b2c-login-test #52/#60; search+first-result from search-product; redaction/diag from #57/#59). \u2605 NET-NEW authenticated selectors (add-to-cart/cart/checkout/pickup/timeslot/clear-cart/logout) are resilient but NOT yet live-verified \u2014 each failing step emits a structural OTHER-DIAG so the FIRST sandbox fire verifies/corrects them. sensitive=true: real login; redact_patterns + the built-in denylist scrub Bearer/JWT/B2C-session. \u2605 DO NOT SCHEDULE until every step is proven green + clean-teardown across several on-demand fires and Craig sets cadence/region posture.",
       "target": "https://www.wegmans.com",
       "enabledByDefault": false,
       "sensitive": true,
@@ -330,6 +365,264 @@
         "wgcl_[0-9a-fA-F-]{36}",
         "\"name\"\\s*:\\s*\"(loyaltyNumber|loyalty_number|shoppersClub|shoppers_club|phoneNumber|phone_number|firstName|first_name|lastName|last_name|email|CUID|ECID)\"\\s*,\\s*\"value\"\\s*:\\s*\"[^\"]*\""
       ]
+    },
+    {
+      "id": "wegmans-sign-in-sign-out",
+      "name": "Wegmans: sign in / sign out",
+      "script": "monitors/wegmans/sign-in-sign-out.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "journey", "disabled"],
+      "description": "Authenticated sign-in and sign-out translated from Dynatrace TF: login, assert greeting, sign out, assert Sign In reappears.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-digital-coupons",
+      "name": "Wegmans: digital coupons",
+      "script": "monitors/wegmans/digital-coupons.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "coupons", "journey", "disabled"],
+      "description": "Authenticated digital coupons path translated from Dynatrace TF: login, open Digital Coupons, verify a clippable coupon renders, sign out.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-order-history",
+      "name": "Wegmans: order history",
+      "script": "monitors/wegmans/order-history.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "orders", "journey", "disabled"],
+      "description": "Authenticated order history path translated from Dynatrace TF: login, open My Orders & Receipts, verify an order detail link renders, sign out.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-update-cart-quantity",
+      "name": "Wegmans: cart add + empty list",
+      "script": "monitors/wegmans/update-cart-quantity.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "cart", "journey", "disabled"],
+      "description": "Translated from Dynatrace TF \"Update Cart Quantity (Increment & Decrement)\": login, search a2 Milk, add to My List, empty the list, sign out. NOTE: the source TF's clickpath events contain no stepper increment/decrement interaction despite the resource name; this spec faithfully reproduces the clickpath as authored.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-ai-assistant",
+      "name": "Wegmans: AI assistant",
+      "script": "monitors/wegmans/ai-assistant.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["wegmans", "auth", "ai-assistant", "journey", "disabled"],
+      "description": "Authenticated AI assistant path translated from Dynatrace TF: login, open the AI chat toggle, select a suggested prompt, verify the response's feedback control renders.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-ebt-card-verification",
+      "name": "Wegmans: EBT card verification",
+      "script": "monitors/wegmans/ebt-card-verification.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": [
+        "wegmans",
+        "auth",
+        "checkout",
+        "payment",
+        "ebt",
+        "journey",
+        "disabled"
+      ],
+      "description": "Authenticated checkout path translated from Dynatrace TF: login, choose pickup, checkout, choose a time slot, confirm mobile number, toggle EBT SNAP card payment, open and close the EBT PIN entry modal.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "wegmans-wine-beer-spirits-dob-gate",
+      "name": "Wegmans: Wine, Beer & Spirits DOB gate",
+      "script": "monitors/wegmans/wine-beer-spirits-dob-gate.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": [
+        "wegmans",
+        "auth",
+        "checkout",
+        "age-verification",
+        "journey",
+        "disabled"
+      ],
+      "description": "Translated from Dynatrace \"IWS Synthetic Availability Terraform\": login, choose pickup, browse Wine, Beer & Spirits > New York, add a product, go to checkout, satisfy the date-of-birth age-verification gate, then empty the cart.",
+      "target": "https://www.wegmans.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "meals2go-order-summary",
+      "name": "Meals2Go: order summary + payment method",
+      "script": "monitors/wegmans/meals2go-order-summary.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": [
+        "meals2go",
+        "auth",
+        "checkout",
+        "payment",
+        "journey",
+        "disabled"
+      ],
+      "description": "Translated from Dynatrace \"Meals2go Order Summary (Terraform)\": sign in via the hamburger menu, start a carryout order at the Latta Road/Rochester store, reach the cart and checkout, confirm fulfillment, open the add-payment-method / add-credit-card surfaces, then sign out. Unverified against production (no meals2go credentials available during conversion).",
+      "target": "https://www.meals2go.com",
+      "enabledByDefault": false,
+      "sensitive": true,
+      "redact_patterns": [
+        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
+        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
+      ]
+    },
+    {
+      "id": "microsite-aa-wines-spirits",
+      "name": "Microsite: A&A Wines & Spirits",
+      "script": "monitors/wegmans/microsite-aa-wines-spirits.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to http://aandawineandspirits.com and verify the page title identifies the site as A&A Wines & Spirits.",
+      "target": "http://aandawineandspirits.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-amherst-wine-liquor",
+      "name": "Microsite: Amherst St Wine & Liquor",
+      "script": "monitors/wegmans/microsite-amherst-wine-liquor.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to http://www.amherstwineandliquor.com/ and verify the page title identifies the site as Amherst St Wine & Liquor.",
+      "target": "http://www.amherstwineandliquor.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-century-liquor-wines",
+      "name": "Microsite: Century Liquor & Wines",
+      "script": "monitors/wegmans/microsite-century-liquor-wines.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to http://www.centuryliquorandwines.com/ and verify the page title identifies the site as Century Liquor & Wines.",
+      "target": "http://www.centuryliquorandwines.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-hunt-valley-wine-liquor-beer",
+      "name": "Microsite: Hunt Valley Wine, Liquor & Beer",
+      "script": "monitors/wegmans/microsite-hunt-valley-wine-liquor-beer.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://www.huntvalleywineandspirits.com/ and verify the page title identifies the site as Hunt Valley Wine, Liquor & Beer.",
+      "target": "https://www.huntvalleywineandspirits.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-johnson-city-liquor-wine",
+      "name": "Microsite: Johnson City Liquor and Wine",
+      "script": "monitors/wegmans/microsite-johnson-city-liquor-wine.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://www.jcwineandspirits.com/ and verify the page title identifies the site as Johnson City Liquor and Wine.",
+      "target": "https://www.jcwineandspirits.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-lake-grove-wine-spirits",
+      "name": "Microsite: Lake Grove Wine & Spirits",
+      "script": "monitors/wegmans/microsite-lake-grove-wine-spirits.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://lakegrovewineandspirits.com/ and verify the page title identifies the site as Lake Grove Wine & Spirits.",
+      "target": "https://lakegrovewineandspirits.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-liquor-city-wine-spirits",
+      "name": "Microsite: Liquor City Wine & Spirits",
+      "script": "monitors/wegmans/microsite-liquor-city-wine-spirits.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://liquorcitywineandspirits.com/ and verify the page title identifies the site as Liquor City Wine & Spirits.",
+      "target": "https://liquorcitywineandspirits.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-northside-wine-spirits",
+      "name": "Microsite: Northside Wine & Spirits",
+      "script": "monitors/wegmans/microsite-northside-wine-spirits.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://www.northsidewine.com/ and verify the page title identifies the site as Northside Wine & Spirits.",
+      "target": "https://www.northsidewine.com",
+      "enabledByDefault": false,
+      "sensitive": false
+    },
+    {
+      "id": "microsite-burger-bar",
+      "name": "Microsite: The Burger Bar by Wegmans",
+      "script": "monitors/wegmans/microsite-burger-bar.spec.ts",
+      "kind": "browser",
+      "suggestedIntervalSeconds": 1800,
+      "tags": ["microsite", "homepage", "journey", "disabled"],
+      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://www.wegmansburgerbar.com and verify the page title identifies the site as The Burger Bar by Wegmans.",
+      "target": "https://www.wegmansburgerbar.com",
+      "enabledByDefault": false,
+      "sensitive": false
     }
   ]
 }
