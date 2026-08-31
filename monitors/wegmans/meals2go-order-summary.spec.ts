@@ -10,7 +10,7 @@ import {
  * Monitor: meals2go-order-summary
  *
  * Journey (converted from Dynatrace "Meals2go Order Summary (Terraform)"):
- * meals2go.com -> sign in via the hamburger menu -> start a CARRYOUT order -> search the
+ * meals2go.com -> sign in via the header's direct Sign In button -> start a CARRYOUT order -> search the
  * "Latta Road, Rochester" store -> select it -> add an item is NOT required by the source TF
  * (it goes straight from store-select to Cart/Checkout, implying an item is already present from
  * an earlier step in that TF's shared fixture) -> Cart -> Checkout -> fulfillment confirmation ->
@@ -37,27 +37,27 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await dismissInterstitials(page);
   });
 
-  await step("sign in via the hamburger menu", async () => {
-    const hamburger = page
-      .locator(".hamburger-icon, .hamburger-icon-container")
-      .or(page.getByRole("button", { name: /menu/i }))
-      .filter({ visible: true })
-      .first();
-    await expect(
-      hamburger,
-      "STEP: hamburger menu icon not visible.",
-    ).toBeVisible({ timeout: 20_000 });
-    await hamburger.click();
-
+  await step("sign in via the header sign-in button", async () => {
+    // ★ Reproduced live against production (default 1280x720 desktop viewport, same as this
+    // runner): clicking `.hamburger-icon` does NOT open an account slide-out panel at this
+    // viewport -- it navigates the whole page to /browse-menu (it's the food-category "Menu"
+    // toggle, not an account menu; the account panel with a `hamburger-menu-sign-in` class item
+    // only appears at narrow/mobile viewports). That earlier hamburger+panel approach was
+    // therefore reproducing the exact "Sign In / Register menu item not visible" timeout seen
+    // in the real monitoring run: after the click navigated away to /browse-menu, no
+    // "sign in|register" role match ever appeared there within 15s.
+    //
+    // The landing page itself already exposes a directly-visible, unambiguous "Sign in" button
+    // (class `greeting-sign-in`, confirmed live) -- skip the hamburger entirely and click it.
     const signInLink = page
-      .getByRole("link", { name: /sign in|register/i })
-      .or(page.getByRole("button", { name: /sign in|register/i }))
+      .locator(".greeting-sign-in")
+      .or(page.getByRole("button", { name: /^sign in$/i }))
+      .or(page.getByRole("link", { name: /^sign in$/i }))
       .filter({ visible: true })
       .first();
-    await expect(
-      signInLink,
-      'STEP: "Sign In / Register" menu item not visible.',
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(signInLink, 'STEP: "Sign In" button not visible.').toBeVisible(
+      { timeout: 20_000 },
+    );
     await signInLink.click();
 
     const usernameInput = page.locator(".mdc-text-field__input").nth(0);
@@ -74,17 +74,17 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await passwordInput.type(password, { delay: 50 });
     await passwordInput.press("Enter");
 
-    // Post-login, the hamburger menu should offer Sign Out instead of Sign In.
-    await hamburger.click();
+    // Post-login, the greeting area should swap to a Sign Out affordance. Checked directly on
+    // the page (no hamburger click needed -- see the note above on why the hamburger is
+    // unreliable at this viewport).
     await expect(
       page
         .getByRole("link", { name: /sign out/i })
         .or(page.getByRole("button", { name: /sign out/i }))
+        .filter({ visible: true })
         .first(),
       "STEP: sign-out affordance did not appear after login.",
     ).toBeVisible({ timeout: 45_000 });
-    // Close the menu back out.
-    await hamburger.click();
   });
 
   await step(
@@ -257,13 +257,8 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
   });
 
   await step("sign out", async () => {
-    const hamburger = page
-      .locator(".hamburger-icon, .hamburger-icon-container")
-      .or(page.getByRole("button", { name: /menu/i }))
-      .filter({ visible: true })
-      .first();
-    await hamburger.click();
-
+    // Same direct-greeting-button approach as sign-in: no hamburger click, since it
+    // navigates away to /browse-menu at this viewport instead of opening an account panel.
     const signOutLink = page
       .getByRole("link", { name: /sign out/i })
       .or(page.getByRole("button", { name: /sign out/i }))
