@@ -95,9 +95,23 @@ test("AI Assistant Terraform flow", async ({ page }) => {
 
   await login(page, username, password);
 
+  // ⚠ FEATURE-FLAG DEPENDENCY (discovered after a live CI failure, 2026-08-31):
+  // decompiling the live www.wegmans.com bundle shows the toggle button is gated
+  // by BOTH being logged in AND a LaunchDarkly flag (`cooklistAiChatbotEnabled`).
+  // If that flag is off for the monitoring account, this button never renders no
+  // matter how long we wait -- a red here may mean "flag disabled for this
+  // account", not "the feature is broken". Verify the flag is enabled for the
+  // credentialed monitoring account before trusting a red/green result here.
   await step("Open the AI chat assistant", async () => {
+    // The toggle's private CSS class is an unstable target (the original
+    // `button.component--ai-chat-toggle-button` selector never matched live --
+    // the button is conditionally rendered, see the feature-flag note above).
+    // Its accessible name is stable across state ("AI Assistant" / "AI
+    // Assistant, processing" / "AI Assistant, response ready"), so prefer role.
     const chatToggle = page
-      .locator("button.component--ai-chat-toggle-button")
+      .getByRole("button", { name: /^ai assistant/i })
+      .or(page.locator("button.component--ai-chat-toggle-button"))
+      .filter({ visible: true })
       .first();
     await expect(chatToggle).toBeVisible({ timeout: 30_000 });
     await chatToggle.click();
