@@ -37,18 +37,33 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await dismissInterstitials(page);
   });
 
+  // ★ The account hamburger's ID is page-scoped, e.g. `landing-page-header-hamburger-menu`,
+  // `main-header-hamburger-menu`, `search-page-header-hamburger-menu` (confirmed live by
+  // decompiling the production Angular bundle). A prior fix used a generic
+  // `.hamburger-icon, .hamburger-icon-container` class selector `.or()`-ed with
+  // `getByRole('button', { name: /menu/i })` as a fallback -- but that fallback ALSO matches
+  // the unrelated food-category "Menu" toggle button in the top-left of the header (its
+  // accessible name is literally "Menu"), and since that button appears earlier in DOM order,
+  // `.first()` picked it instead of the real account hamburger, silently navigating the page to
+  // /browse-menu. Scoping to the `*-header-hamburger-menu` id suffix (a real Angular button id,
+  // not a role heuristic) avoids that ambiguity entirely.
+  const hamburgerMenu = () =>
+    page
+      .locator('[id$="header-hamburger-menu" i]')
+      .filter({ visible: true })
+      .first();
+
+  // The panel is closed via its own dedicated close button (`#hamburger-menu-close-button`),
+  // NOT by re-clicking the hamburger toggle: once open, the panel (`app-right-pane`) overlays
+  // and intercepts pointer events on the underlying header button, so a second click on
+  // `hamburgerMenu()` just hangs waiting for the obscured element to become clickable
+  // (reproduced live).
+  const closeHamburgerMenu = () => page.locator("#hamburger-menu-close-button");
+
   await step("sign in via the header sign-in button", async () => {
-    // ★ Reproduced live against production (default 1280x720 desktop viewport, same as this
-    // runner): clicking `.hamburger-icon` does NOT open an account slide-out panel at this
-    // viewport -- it navigates the whole page to /browse-menu (it's the food-category "Menu"
-    // toggle, not an account menu; the account panel with a `hamburger-menu-sign-in` class item
-    // only appears at narrow/mobile viewports). That earlier hamburger+panel approach was
-    // therefore reproducing the exact "Sign In / Register menu item not visible" timeout seen
-    // in the real monitoring run: after the click navigated away to /browse-menu, no
-    // "sign in|register" role match ever appeared there within 15s.
-    //
-    // The landing page itself already exposes a directly-visible, unambiguous "Sign in" button
-    // (class `greeting-sign-in`, confirmed live) -- skip the hamburger entirely and click it.
+    // The landing page itself also exposes a directly-visible, unambiguous "Sign in" button
+    // (class `greeting-sign-in`, confirmed live) that's simpler than opening the hamburger panel
+    // for the initial sign-in -- keep using it for this step.
     const signInLink = page
       .locator(".greeting-sign-in")
       .or(page.getByRole("button", { name: /^sign in$/i }))
@@ -74,9 +89,11 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await passwordInput.type(password, { delay: 50 });
     await passwordInput.press("Enter");
 
-    // Post-login, the greeting area should swap to a Sign Out affordance. Checked directly on
-    // the page (no hamburger click needed -- see the note above on why the hamburger is
-    // unreliable at this viewport).
+    // Post-login, the account hamburger panel should offer Sign Out instead of Sign In
+    // (confirmed live in the decompiled bundle: the panel template swaps a "Sign In" button
+    // for a "Sign Out" button based on `userHasValidB2CSession`).
+    await page.waitForURL(/meals2go\.com/, { timeout: 45_000 });
+    await hamburgerMenu().click();
     await expect(
       page
         .getByRole("link", { name: /sign out/i })
@@ -85,6 +102,8 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
         .first(),
       "STEP: sign-out affordance did not appear after login.",
     ).toBeVisible({ timeout: 45_000 });
+    // Close the panel back out.
+    await closeHamburgerMenu().click();
   });
 
   await step(
@@ -257,8 +276,12 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
   });
 
   await step("sign out", async () => {
-    // Same direct-greeting-button approach as sign-in: no hamburger click, since it
-    // navigates away to /browse-menu at this viewport instead of opening an account panel.
+    // Open the account hamburger panel (the real trigger, confirmed live -- see the
+    // `hamburgerMenu` note above) rather than looking for a bare "Sign Out" role match: the
+    // Sign Out button only exists inside this panel, per the decompiled bundle
+    // (`signOutClickEvent` is only wired on the hamburger-menu template).
+    await hamburgerMenu().click();
+
     const signOutLink = page
       .getByRole("link", { name: /sign out/i })
       .or(page.getByRole("button", { name: /sign out/i }))
@@ -269,6 +292,8 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     });
     await signOutLink.click();
 
+    // Sign out is confirmed via a modal dialog ("Are you sure you want to sign out?" with
+    // Cancel / Sign out actions), confirmed live in the decompiled bundle.
     const confirmSignOut = page
       .getByRole("button", { name: /sign out/i })
       .filter({ visible: true })
@@ -279,8 +304,15 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
       .catch(() => false);
     if (confirmVisible) await confirmSignOut.click();
 
+    // Post-sign-out, the landing page's greeting reverts to a "Sign in" BUTTON (not a link --
+    // matches the same `.greeting-sign-in` element used to start this flow).
     await expect(
-      page.getByRole("link", { name: /sign in|register/i }).first(),
+      page
+        .locator(".greeting-sign-in")
+        .or(page.getByRole("button", { name: /^sign in$/i }))
+        .or(page.getByRole("link", { name: /sign in|register/i }))
+        .filter({ visible: true })
+        .first(),
       "STEP: sign-in affordance did not reappear after sign out.",
     ).toBeVisible({ timeout: 20_000 });
   });
