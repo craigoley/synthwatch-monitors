@@ -362,6 +362,44 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     if (summaryVisible) await closeSummary.click();
   });
 
+  // ★ A live run showed a generic `app-modal-message` (`role="dialog"`, `.weg-modal-container`)
+  // still `class="visible"` after the step above, intercepting pointer events on the hamburger
+  // panel's Sign Out button for the full 30s timeout even though Playwright reported the button
+  // itself "visible, enabled and stable" -- i.e. some dialog the ".close-button"/
+  // ".close-button-container" locators above didn't match was still open. `app-modal-message` is
+  // a shared, generic message-dialog wrapper (confirmed live by decompiling the production
+  // Angular bundle) reused across the checkout/payment surfaces for various confirmations, so its
+  // exact copy/buttons vary by cart and payment-method state and can't be enumerated in advance
+  // without live credentials. Defensively close ANY such dialog that's still open before
+  // attempting to open the hamburger panel, rather than trying to name every possible instance.
+  await step("dismiss any lingering checkout dialog", async () => {
+    const openDialog = page
+      .getByRole("dialog")
+      .filter({ visible: true })
+      .first();
+    const dialogVisible = await openDialog
+      .waitFor({ state: "visible", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!dialogVisible) return;
+
+    const dismissButton = openDialog
+      .getByRole("button", {
+        name: /^(close|cancel|ok|got it|continue|dismiss)$/i,
+      })
+      .filter({ visible: true })
+      .first();
+    const dismissVisible = await dismissButton
+      .waitFor({ state: "visible", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (dismissVisible) {
+      await dismissButton.click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
+  });
+
   await step("sign out", async () => {
     // Open the account hamburger panel (the real trigger, confirmed live -- see the
     // `hamburgerMenu` note above) rather than looking for a bare "Sign Out" role match: the
