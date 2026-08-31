@@ -456,16 +456,26 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     if (confirmVisible)
       await confirmSignOut.click({ force: true, timeout: 10_000 });
 
-    // Post-sign-out, the landing page's greeting reverts to a "Sign in" BUTTON (not a link --
-    // matches the same `.greeting-sign-in` element used to start this flow).
+    // Post-sign-out, `b2cSignOutInitiate` (confirmed live in the decompiled bundle) is the same
+    // kind of full B2C redirect round trip used at sign-in (which this spec already waits out via
+    // `page.waitForURL(/meals2go\.com/, { timeout: 45_000 })` before checking the post-login
+    // affordance) -- the previous version of this step asserted the "Sign in" affordance
+    // IMMEDIATELY after the confirm click with only a 20s budget and no navigation wait, which a
+    // live run showed times out: the redirect round trip hadn't landed back on meals2go.com yet.
+    // Wait out the same redirect, then re-check via the hamburger panel (works regardless of
+    // which meals2go.com route the redirect lands back on, unlike the landing-page-only
+    // `.greeting-sign-in` button), mirroring the sign-in step's own verification strategy.
+    await page.waitForURL(/meals2go\.com/, { timeout: 45_000 }).catch(() => {});
+
+    await hamburgerMenu().click({ force: true, timeout: 10_000 });
     await expect(
       page
-        .locator(".greeting-sign-in")
+        .getByRole("link", { name: /^sign in$/i })
         .or(page.getByRole("button", { name: /^sign in$/i }))
-        .or(page.getByRole("link", { name: /sign in|register/i }))
+        .or(page.locator(".greeting-sign-in"))
         .filter({ visible: true })
         .first(),
       "STEP: sign-in affordance did not reappear after sign out.",
-    ).toBeVisible({ timeout: 20_000 });
+    ).toBeVisible({ timeout: 45_000 });
   });
 });
