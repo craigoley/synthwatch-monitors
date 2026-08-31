@@ -373,30 +373,47 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
   // without live credentials. Defensively close ANY such dialog that's still open before
   // attempting to open the hamburger panel, rather than trying to name every possible instance.
   await step("dismiss any lingering checkout dialog", async () => {
-    const openDialog = page
-      .getByRole("dialog")
-      .filter({ visible: true })
-      .first();
-    const dialogVisible = await openDialog
-      .waitFor({ state: "visible", timeout: 3_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!dialogVisible) return;
+    // ★ A second live run showed this step ITSELF hang for the full 30s on
+    // `dismissButton.click()`, even though `waitFor({state:"visible"})` had just confirmed the
+    // button visible. `state: "visible"` only checks the element is rendered/non-zero-size --
+    // Playwright's plain `.click()` additionally waits for the target to "receive events" (not
+    // covered by another element), and it's exactly that second check hanging -- the same
+    // pointer-interception failure mode this step was added to work around, just one layer
+    // deeper (a stacked dialog, or the dialog's own close icon sitting under a sibling
+    // overlay/backdrop). This step is best-effort cleanup, not a correctness assertion, so bypass
+    // the interception check entirely with `force: true` and a short per-attempt timeout, and try
+    // more than once in case dialogs are stacked. Every action here is try/caught so this step
+    // can never itself hang or fail the run -- worst case it's a no-op and the "sign out" step's
+    // own generous timeouts are left to do the real work.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await page.keyboard.press("Escape").catch(() => {});
 
-    const dismissButton = openDialog
-      .getByRole("button", {
-        name: /^(close|cancel|ok|got it|continue|dismiss)$/i,
-      })
-      .filter({ visible: true })
-      .first();
-    const dismissVisible = await dismissButton
-      .waitFor({ state: "visible", timeout: 3_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (dismissVisible) {
-      await dismissButton.click();
-    } else {
-      await page.keyboard.press("Escape");
+      const openDialog = page
+        .getByRole("dialog")
+        .filter({ visible: true })
+        .first();
+      const dialogVisible = await openDialog
+        .waitFor({ state: "visible", timeout: 2_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!dialogVisible) return;
+
+      const dismissButton = openDialog
+        .getByRole("button", {
+          name: /^(close|cancel|ok|got it|continue|dismiss)$/i,
+        })
+        .or(openDialog.locator(".close-button, .close-button-container"))
+        .filter({ visible: true })
+        .first();
+      const dismissVisible = await dismissButton
+        .waitFor({ state: "visible", timeout: 2_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (dismissVisible) {
+        await dismissButton
+          .click({ force: true, timeout: 5_000 })
+          .catch(() => {});
+      }
     }
   });
 
@@ -405,7 +422,16 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     // `hamburgerMenu` note above) rather than looking for a bare "Sign Out" role match: the
     // Sign Out button only exists inside this panel, per the decompiled bundle
     // (`signOutClickEvent` is only wired on the hamburger-menu template).
-    await hamburgerMenu().click();
+    // ★ Two live runs have now shown a leftover checkout dialog intercept pointer events on this
+    // panel/button even after the resolved locator is reported "visible, enabled and stable" --
+    // and the "dismiss any lingering checkout dialog" step above is only best-effort (it never
+    // throws). Rather than risk a third 30s hang on the same root cause, force these three
+    // clicks: the locators above are already scoped tightly enough (page-scoped hamburger id,
+    // role + name-filtered sign-out controls) that `force: true` -- which only skips the
+    // "receives pointer events" actionability check, not locator resolution -- can't misfire onto
+    // an unrelated element; it just stops an intercepting overlay from blocking the click
+    // forever.
+    await hamburgerMenu().click({ force: true, timeout: 10_000 });
 
     const signOutLink = page
       .getByRole("link", { name: /sign out/i })
@@ -415,7 +441,7 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await expect(signOutLink, "STEP: sign-out link not visible.").toBeVisible({
       timeout: 20_000,
     });
-    await signOutLink.click();
+    await signOutLink.click({ force: true, timeout: 10_000 });
 
     // Sign out is confirmed via a modal dialog ("Are you sure you want to sign out?" with
     // Cancel / Sign out actions), confirmed live in the decompiled bundle.
@@ -427,7 +453,8 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
       .waitFor({ state: "visible", timeout: 8_000 })
       .then(() => true)
       .catch(() => false);
-    if (confirmVisible) await confirmSignOut.click();
+    if (confirmVisible)
+      await confirmSignOut.click({ force: true, timeout: 10_000 });
 
     // Post-sign-out, the landing page's greeting reverts to a "Sign in" BUTTON (not a link --
     // matches the same `.greeting-sign-in` element used to start this flow).
