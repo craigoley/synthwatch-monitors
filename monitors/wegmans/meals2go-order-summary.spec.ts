@@ -11,18 +11,19 @@ import {
  *
  * Journey (converted from Dynatrace "Meals2go Order Summary (Terraform)"):
  * meals2go.com -> sign in via the header's direct Sign In button -> start a CARRYOUT order -> search the
- * "Latta Road, Rochester" store -> select it -> add an item is NOT required by the source TF
- * (it goes straight from store-select to Cart/Checkout, implying an item is already present from
- * an earlier step in that TF's shared fixture) -> Cart -> Checkout -> fulfillment confirmation ->
- * open "Add a Payment Method" -> open "+Add credit card" -> close the card modal -> close the
- * order-summary panel -> sign out.
+ * "Latta Road, Rochester" store -> select it -> add a cheese pizza to the cart (the TF's own
+ * shared fixture apparently pre-seeded the cart before this flow ran; a real monitoring run with a
+ * fresh/empty cart proved that assumption wrong -- see the "add a cheese pizza to cart" step below)
+ * -> Cart -> Checkout -> fulfillment confirmation -> open "Add a Payment Method" -> open
+ * "+Add credit card" -> close the card modal -> close the order-summary panel -> sign out.
  *
  * This is the first AUTHENTICATED meals2go.com monitor; it reuses the address-search and
- * virtualized-store-list locator strategy proven live in meals2go-cheese-pizza-cart.spec.ts
- * (Google address autocomplete -> app-wegmans-store list filtered via input#store-search-input),
- * but the sign-in, checkout, and payment-method surfaces have NOT been recon'd against production
- * (no test credentials available to this conversion). Ships enabledByDefault: false pending a
- * verified run from an allowlisted egress with real credentials.
+ * virtualized-store-list locator strategy, AND the add-to-cart locator/verification strategy,
+ * proven live in meals2go-cheese-pizza-cart.spec.ts (Google address autocomplete ->
+ * app-wegmans-store list filtered via input#store-search-input; thin-crust cheese pizza tile ->
+ * cart-items POST verification), but the checkout and payment-method surfaces have NOT been
+ * recon'd against production (no test credentials available to this conversion). Ships
+ * enabledByDefault: false pending a verified run from an allowlisted egress with real credentials.
  */
 test("Meals2Go: signed-in carryout order summary + payment method", async ({
   page,
@@ -167,6 +168,92 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
       await dismissInterstitials(page);
     },
   );
+
+  await step("add a cheese pizza to cart", async () => {
+    // ★ Real monitoring run proved the TF's implicit assumption wrong: a fresh/empty cart does
+    // NOT expose "Checkout" / "My Cart" text when the cart icon is opened (STEP: "Checkout" text
+    // missing from cart panel). An item must actually be added first. Reuses the exact tile
+    // selection + add-to-cart + cart-items API verification strategy proven live in
+    // meals2go-cheese-pizza-cart.spec.ts (same site, same DOM structure, different store).
+    await dismissInterstitials(page);
+
+    const pizzaCategory = page
+      .getByRole("tab", { name: /pizza/i })
+      .or(page.getByRole("link", { name: /^pizza$/i }))
+      .or(page.getByRole("button", { name: /^pizza$/i }))
+      .first();
+    await expect(pizzaCategory, "STEP: Pizza category not found.").toBeVisible({
+      timeout: 20_000,
+    });
+    await pizzaCategory.click({ timeout: 5_000 });
+    await dismissInterstitials(page);
+
+    // The cheese pizza lives under the "Thin Crust Pizza" sub-cuisine tab; the default
+    // "Pizza Promos" tab only has disabled promo banners (see the STRUCTURAL discriminator note
+    // in meals2go-cheese-pizza-cart.spec.ts for why plain-text matching on a promo tile is unsafe).
+    const thinCrustTab = page
+      .locator("button#cuisine-thin-crust-pizza")
+      .or(page.getByRole("tab", { name: /thin crust pizza/i }))
+      .or(page.getByRole("button", { name: /thin crust pizza/i }))
+      .filter({ visible: true })
+      .first();
+    try {
+      if (await thinCrustTab.isVisible({ timeout: 8_000 }))
+        await thinCrustTab.click({ timeout: 5_000 });
+    } catch {
+      /* menu may be restructured -- the cheese match below still tries */
+    }
+    await dismissInterstitials(page);
+
+    // Only match a real, clickable product tile (menu-card-link, not disabled) -- NOT any
+    // element whose accessible name/text contains "cheese", which can also match a disabled
+    // promo banner (see meals2go-cheese-pizza-cart.spec.ts for the exact incident this avoids).
+    const cheesePizza = page
+      .locator(
+        "button.menu-card-link:not([disabled]), a.menu-card-link:not([disabled])",
+      )
+      .filter({ hasText: /cheese/i })
+      .first();
+    await expect(
+      cheesePizza,
+      "STEP: no clickable cheese pizza tile under the thin-crust listing.",
+    ).toBeVisible({ timeout: 20_000 });
+    await cheesePizza.click({ timeout: 5_000 });
+    await dismissInterstitials(page);
+
+    const addToCart = page
+      .locator("app-pop-open-pane button.cart-button, button.cart-button")
+      .or(page.getByRole("button", { name: /add to cart/i }))
+      .first();
+    await expect(
+      addToCart,
+      "STEP: add-to-cart button did not render in the detail pane.",
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Verify the mutation via the cart-items API response, not a DOM toast/badge (unreliable
+    // headless). Arm the wait BEFORE the click.
+    const addResp = await (async () => {
+      const promise = page
+        .waitForResponse(
+          (r) =>
+            r.request().method() === "POST" &&
+            /\/cart-items(\?|$)/.test(r.url()),
+          { timeout: 60_000 },
+        )
+        .catch(() => null);
+      await addToCart.click({ timeout: 5_000 });
+      return promise;
+    })();
+    expect(
+      addResp,
+      "STEP: no cart-items POST was observed after clicking add-to-cart.",
+    ).toBeTruthy();
+    const status = addResp!.status();
+    expect(
+      status,
+      `STEP: cart-items responded HTTP ${status}, expected 200.`,
+    ).toBe(200);
+  });
 
   await step("open cart and go to checkout", async () => {
     const cartIcon = page
