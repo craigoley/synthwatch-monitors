@@ -367,22 +367,6 @@
       ]
     },
     {
-      "id": "wegmans-sign-in-sign-out",
-      "name": "Wegmans: sign in / sign out",
-      "script": "monitors/wegmans/sign-in-sign-out.spec.ts",
-      "kind": "browser",
-      "suggestedIntervalSeconds": 1800,
-      "tags": ["wegmans", "auth", "journey", "disabled"],
-      "description": "Authenticated sign-in and sign-out translated from Dynatrace TF: login, assert greeting, sign out, assert Sign In reappears.",
-      "target": "https://www.wegmans.com",
-      "enabledByDefault": false,
-      "sensitive": true,
-      "redact_patterns": [
-        "(SW_CRED_USERNAME|SW_CRED_PASSWORD|Authorization|authorization|Bearer|bearer)\\s*[:=]\\s*\\S+",
-        "[?#&](id_token|access_token|refresh_token|code|client_assertion|x-ms-cpim-[a-z]+)=[^&\\s]+"
-      ]
-    },
-    {
       "id": "wegmans-digital-coupons",
       "name": "Wegmans: digital coupons",
       "script": "monitors/wegmans/digital-coupons.spec.ts",
@@ -573,18 +557,6 @@
       "tags": ["microsite", "homepage", "journey", "disabled"],
       "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://www.jcwineandspirits.com/ and verify the page title identifies the site as Johnson City Liquor and Wine.",
       "target": "https://www.jcwineandspirits.com",
-      "enabledByDefault": false,
-      "sensitive": false
-    },
-    {
-      "id": "microsite-lake-grove-wine-spirits",
-      "name": "Microsite: Lake Grove Wine & Spirits",
-      "script": "monitors/wegmans/microsite-lake-grove-wine-spirits.spec.ts",
-      "kind": "browser",
-      "suggestedIntervalSeconds": 1800,
-      "tags": ["microsite", "homepage", "journey", "disabled"],
-      "description": "Translated from Dynatrace synthetic-category=microsite monitor: navigate to https://lakegrovewineandspirits.com/ and verify the page title identifies the site as Lake Grove Wine & Spirits.",
-      "target": "https://lakegrovewineandspirits.com",
       "enabledByDefault": false,
       "sensitive": false
     },
