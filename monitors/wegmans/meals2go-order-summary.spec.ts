@@ -351,15 +351,52 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
       .catch(() => false);
     if (closeVisible) await closeButton.click();
 
-    const closeSummary = page
-      .locator(".close-button-container")
+    // ★ ROOT CAUSE of every "sign out" failure below, found by running this spec LOCALLY
+    // (headless, real credentials) instead of only via the SynthWatch sandbox -- local runs let
+    // us add temporary `page.locator(...).evaluateAll(...)` diagnostics and iterate in seconds.
+    // The checkout/order-summary flow renders inside a shared `app-right-pane` slide-in drawer
+    // component (NOT a modal dialog) that stays mounted and OPEN until explicitly closed via its
+    // own icon-only close button -- confirmed live:
+    // `<div class="close-button-container"><button id="order-summary-close-button"
+    // class="unstyled-button clickable">` (no text, no aria-label -- invisible to
+    // getByRole entirely). The PRIOR version of this step used a bare `.close-button-container`
+    // class selector `.first()`, but that same class is ALSO used by the (already-closed)
+    // payment-method modal earlier in DOM order, so `.first()` kept resolving to that stale
+    // element and this right-pane was silently left open for the rest of the run. Because
+    // `app-right-pane` is evidently a SINGLE shared component reused for both the checkout
+    // drawer and the account hamburger panel, leaving it open here meant every later hamburger
+    // click in the "sign out" step just toggled/reset this SAME open pane (observed live:
+    // its content went straight from the checkout drawer to briefly empty and never actually
+    // switched to the account "Sign Out" content within the assertion's timeout) instead of
+    // opening a fresh account panel -- this fully explains the entire string of "sign out"
+    // failures, each of which was really a symptom of this one root cause surfacing differently.
+    // Scope specifically to `app-right-pane`'s own close button (the stable `[id$="-close-
+    // button" i]` convention, confirmed to also be used by the hamburger panel's own
+    // `#hamburger-menu-close-button`), and give the close animation a brief moment to settle
+    // before proceeding -- confirmed live via local runs that a plain `.click()` here reliably
+    // empties the pane's content (the real "closed" signal; the wrapper element itself stays
+    // mounted, just with no content, evidently for the slide-out transition), it just needs
+    // ~1.5s to actually take effect before the next step touches the hamburger.
+    const rightPaneCloseButton = page
+      .locator('app-right-pane [id$="-close-button" i]')
       .filter({ visible: true })
       .first();
-    const summaryVisible = await closeSummary
+    const rightPaneCloseVisible = await rightPaneCloseButton
       .waitFor({ state: "visible", timeout: 10_000 })
       .then(() => true)
       .catch(() => false);
-    if (summaryVisible) await closeSummary.click();
+    if (rightPaneCloseVisible) {
+      await rightPaneCloseButton.click({ timeout: 5_000 }).catch(() => {});
+      // Event-driven settle instead of a hard sleep: wait for the checkout-flavored content to
+      // actually clear out of the pane (confirmed live via local runs that the click reliably
+      // empties -- not necessarily fully unmounts -- the pane's content) before moving on.
+      await page
+        .locator("app-right-pane")
+        .filter({ visible: true, hasText: /checkout|order summary|items \(/i })
+        .first()
+        .waitFor({ state: "hidden", timeout: 5_000 })
+        .catch(() => {});
+    }
   });
 
   // ★ A live run showed a generic `app-modal-message` (`role="dialog"`, `.weg-modal-container`)
@@ -410,6 +447,7 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
         .then(() => true)
         .catch(() => false);
       if (dismissVisible) {
+        await dismissButton.scrollIntoViewIfNeeded().catch(() => {});
         await dismissButton
           .click({ force: true, timeout: 5_000 })
           .catch(() => {});
@@ -431,6 +469,17 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     // "receives pointer events" actionability check, not locator resolution -- can't misfire onto
     // an unrelated element; it just stops an intercepting overlay from blocking the click
     // forever.
+    // ★ IMPORTANT caveat discovered via LOCAL runs (5 headless runs after the checkout-pane-leak
+    // fix above): `force: true` skips Playwright's normal auto-scroll-into-view step along with
+    // the other actionability checks, so if the panel/button is still mid-slide-in animation (a
+    // real, reproduced-locally ~1-in-4 timing race), a force click can throw "element is outside
+    // of the viewport" outright, since there's no fallback scroll to bring it into a clickable
+    // position first. Explicitly `scrollIntoViewIfNeeded()` before every force click below so the
+    // element has valid in-viewport coordinates regardless of the panel's current scroll/slide
+    // state.
+    await hamburgerMenu()
+      .scrollIntoViewIfNeeded()
+      .catch(() => {});
     await hamburgerMenu().click({ force: true, timeout: 10_000 });
 
     const signOutLink = page
@@ -441,6 +490,7 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await expect(signOutLink, "STEP: sign-out link not visible.").toBeVisible({
       timeout: 20_000,
     });
+    await signOutLink.scrollIntoViewIfNeeded().catch(() => {});
     await signOutLink.click({ force: true, timeout: 10_000 });
 
     // Sign out is confirmed via a modal dialog (title "Sign out", body "Are you sure you want to
@@ -472,6 +522,7 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
       .then(() => true)
       .catch(() => false);
     if (confirmVisible) {
+      await confirmSignOut.scrollIntoViewIfNeeded().catch(() => {});
       await confirmSignOut.click({ force: true, timeout: 10_000 });
     } else {
       // Fallback: the dialog-role scoping above depends on the modal actually exposing
@@ -485,8 +536,10 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
         .waitFor({ state: "visible", timeout: 8_000 })
         .then(() => true)
         .catch(() => false);
-      if (exactCaseVisible)
+      if (exactCaseVisible) {
+        await exactCaseSignOut.scrollIntoViewIfNeeded().catch(() => {});
         await exactCaseSignOut.click({ force: true, timeout: 10_000 });
+      }
     }
 
     // Post-sign-out, `b2cSignOutInitiate` (confirmed live in the decompiled bundle) is the same
@@ -500,6 +553,9 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     // `.greeting-sign-in` button), mirroring the sign-in step's own verification strategy.
     await page.waitForURL(/meals2go\.com/, { timeout: 45_000 }).catch(() => {});
 
+    await hamburgerMenu()
+      .scrollIntoViewIfNeeded()
+      .catch(() => {});
     await hamburgerMenu().click({ force: true, timeout: 10_000 });
 
     // ★ Diagnostic for the NEXT failure report, if any: if "Sign In" never reappears, check
