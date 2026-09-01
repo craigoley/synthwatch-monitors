@@ -445,31 +445,49 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
 
     // Sign out is confirmed via a modal dialog (title "Sign out", body "Are you sure you want to
     // sign out?", actions "Cancel" / "Sign out" -- confirmed live, byte-for-byte, in the
-    // decompiled bundle's `signOutClickEvent`). ★ The hamburger PANEL's own "Sign Out" button
-    // (the one just clicked, above) is NOT necessarily unmounted/hidden the instant this modal
-    // opens on top of it -- Angular components commonly stay CSS-visible while merely obscured by
-    // a later dialog. A prior version of this locator searched the whole page for ANY visible
-    // "sign out"-named button and took `.first()`, which could resolve back to that SAME leftover
-    // panel button instead of the modal's actual confirm action -- re-clicking it would just
-    // re-invoke `signOutClickEvent` (harmless/no-op, since the modal it opens is presumably
-    // already open) rather than ever firing the real `b2cSignOutInitiate`, so the session never
-    // actually signs out and the panel keeps showing "Sign Out" on every later check. Scope
-    // strictly to the dialog itself (`getByRole('dialog')`) and require an EXACT "Sign out" name
-    // (not a substring match) so it can only match the modal's own confirm action.
+    // decompiled bundle's `signOutClickEvent`). ★ TWO live runs now confirm the hamburger PANEL's
+    // own "Sign Out" button (the one just clicked, above) is NOT unmounted/hidden once this modal
+    // opens on top of it, and scoping to merely `getByRole('dialog').first()` was still not
+    // enough to reliably land on the RIGHT dialog when more than one `role="dialog"` element can
+    // be simultaneously visible (e.g. a still-mounted earlier checkout dialog) -- the confirm
+    // click reported success but the diagnostic added last round confirmed the panel still showed
+    // "Sign Out" afterward, i.e. it clicked something other than the real confirm action.
+    // ★ THE RELIABLE SIGNAL, confirmed byte-for-byte in the bundle: the panel's button text is
+    // " Sign Out " (capital O, leading/trailing spaces from its icon+label markup) while the
+    // modal's confirm button's `buttonText` is literally `"Sign out"` (lowercase o) -- an exact,
+    // CASE-SENSITIVE name match distinguishes them even if dialog-role scoping is unreliable.
+    // Combine both signals: scope to a dialog whose text mentions "sign out" (`.last()`, since
+    // Angular appends newly-opened overlay content to the END of the DOM) AND require the exact
+    // case "Sign out" (not "Sign Out") on the button itself.
     const confirmDialog = page
-      .getByRole("dialog")
-      .filter({ visible: true })
-      .first();
+      .locator('[role="dialog"]')
+      .filter({ visible: true, hasText: /sign ?out/i })
+      .last();
     const confirmSignOut = confirmDialog
-      .getByRole("button", { name: /^sign out$/i })
+      .getByRole("button", { name: "Sign out", exact: true })
       .filter({ visible: true })
-      .first();
+      .last();
     const confirmVisible = await confirmSignOut
       .waitFor({ state: "visible", timeout: 8_000 })
       .then(() => true)
       .catch(() => false);
-    if (confirmVisible)
+    if (confirmVisible) {
       await confirmSignOut.click({ force: true, timeout: 10_000 });
+    } else {
+      // Fallback: the dialog-role scoping above depends on the modal actually exposing
+      // `role="dialog"` -- if that's not reliably present, fall back to the exact-case signal
+      // alone, unscoped, which two live runs' decompiled evidence says is unambiguous on its own.
+      const exactCaseSignOut = page
+        .getByRole("button", { name: "Sign out", exact: true })
+        .filter({ visible: true })
+        .last();
+      const exactCaseVisible = await exactCaseSignOut
+        .waitFor({ state: "visible", timeout: 8_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (exactCaseVisible)
+        await exactCaseSignOut.click({ force: true, timeout: 10_000 });
+    }
 
     // Post-sign-out, `b2cSignOutInitiate` (confirmed live in the decompiled bundle) is the same
     // kind of full B2C redirect round trip used at sign-in (which this spec already waits out via
