@@ -129,25 +129,24 @@ test("Wine, Beer & Spirits DOB-gated checkout Terraform flow", async ({
   });
 
   await step("Browse Wine, Beer & Spirits > New York", async () => {
-    // The "Wine, Beer & Spirits" link only renders inside a collapsed departments
-    // menu (verified live: present in the DOM but not visible without opening that
-    // menu first). Per the skill's direct-URL-navigation principle, navigate
-    // straight to the stable category URL instead of driving the menu open.
-    await page.goto(`${baseUrl}/shop/categories/2957056`, {
+    // Navigate straight to the New York subcategory URL rather than landing on the parent
+    // "Wine, Beer & Spirits" category page and clicking through -- this is both faster (one
+    // navigation instead of two) and sidesteps the parent page's hidden departments-menu
+    // duplicate of the "Wine, Beer & Spirits" text entirely (the ORIGINAL bug here: a bare
+    // `getByText(...).first()` for that heading, missing the `.filter({visible:true})` used
+    // elsewhere in this file, resolved to a hidden nav-menu link instead of the real page
+    // heading). Assert on the New York page's own unique `<h1>` instead.
+    await page.goto(`${baseUrl}/shop/categories/2957592`, {
       waitUntil: "domcontentloaded",
     });
-    await expect(page.getByText(/wine,? beer & spirits/i).first()).toBeVisible({
+    await expect(
+      page
+        .getByRole("heading", { name: /^new york$/i })
+        .filter({ visible: true })
+        .first(),
+    ).toBeVisible({
       timeout: 30_000,
     });
-
-    const newYorkCategory = page
-      .locator('a[href="/shop/categories/2957592"]')
-      .or(page.getByRole("link", { name: /^new york$/i }))
-      .filter({ visible: true })
-      .first();
-    await expect(newYorkCategory).toBeVisible({ timeout: 30_000 });
-    await newYorkCategory.click();
-    await page.waitForLoadState("domcontentloaded");
   });
 
   await step("Add a product to cart", async () => {
@@ -158,28 +157,19 @@ test("Wine, Beer & Spirits DOB-gated checkout Terraform flow", async ({
       .first();
     await expect(addButton).toBeVisible({ timeout: 30_000 });
 
-    const cartWrite = page.waitForResponse(
-      (r) => {
-        const method = r.request().method();
-        if (method === "GET" || method === "HEAD") return false;
-        try {
-          const host = new URL(r.url()).hostname.toLowerCase();
-          const onApi =
-            /(^|\.)wegmans\.(com|cloud)$/.test(host) ||
-            /azure-api\.net$/.test(host);
-          return (
-            onApi &&
-            /\/(cart|list|shopping-?list|cart-items)/i.test(r.url()) &&
-            r.status() < 500
-          );
-        } catch {
-          return false;
-        }
-      },
-      { timeout: 30_000 },
-    );
+    // ★ Live + local runs both showed a `waitForResponse` gated on a REST cart/list URL
+    // (`/(cart|list|...)/i`) timing out here every time, even though the add visibly worked
+    // (confirmed via screenshot + DOM inspection: the product tile's quantity badge and the
+    // header cart count both updated). A saved trace showed NO REST/GraphQL HTTP call matching
+    // that pattern around the click at all -- this site's cart write is not confirmable via a
+    // plain HTTP response (it appears to sync over a SignalR websocket channel instead, which
+    // `waitForResponse` can never observe). Verify the mutation the way a user would instead:
+    // this SAME add button's own text swaps from empty (a "+" icon) to its new quantity ("1")
+    // once the write lands -- its `aria-label` stays static, but its text content is the real,
+    // stable, must-go-red signal.
+    const addedIndicator = addButton.filter({ hasText: /^\d+\s*$/ });
     await addButton.click();
-    await cartWrite;
+    await expect(addedIndicator).toBeVisible({ timeout: 45_000 });
   });
 
   await step("Go to checkout", async () => {
@@ -223,22 +213,12 @@ test("Wine, Beer & Spirits DOB-gated checkout Terraform flow", async ({
     await continueButton.click();
   });
 
-  await step("Return home and empty the cart", async () => {
-    const homeLink = page.locator('img[alt="Wegmans"]').first();
-    await expect(homeLink).toBeVisible({ timeout: 30_000 });
-    await homeLink.click();
-    await page.waitForLoadState("domcontentloaded");
-
-    const cartButton = page
-      .locator(
-        'a[href*="/cart"], button:has-text("Cart"), button:has-text("Get it")',
-      )
-      .or(page.getByRole("link", { name: /cart|get it/i }))
-      .or(page.getByRole("button", { name: /cart|get it/i }))
-      .filter({ visible: true })
-      .first();
-    await expect(cartButton).toBeVisible({ timeout: 30_000 });
-    await cartButton.click();
+  await step("Empty the cart", async () => {
+    // Navigate straight to the cart URL instead of clicking the home logo then the header
+    // cart icon -- verified live this lands directly on the same "Empty my cart" affordance,
+    // saving a full extra page load + click round trip (this monitor's total preview run was
+    // hitting the 90s hard flow-budget ceiling before this step could even start).
+    await page.goto(`${baseUrl}/cart`, { waitUntil: "domcontentloaded" });
 
     const emptyCart = page
       .getByRole("button", { name: /empty my cart/i })
