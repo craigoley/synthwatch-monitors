@@ -443,10 +443,25 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     });
     await signOutLink.click({ force: true, timeout: 10_000 });
 
-    // Sign out is confirmed via a modal dialog ("Are you sure you want to sign out?" with
-    // Cancel / Sign out actions), confirmed live in the decompiled bundle.
-    const confirmSignOut = page
-      .getByRole("button", { name: /sign out/i })
+    // Sign out is confirmed via a modal dialog (title "Sign out", body "Are you sure you want to
+    // sign out?", actions "Cancel" / "Sign out" -- confirmed live, byte-for-byte, in the
+    // decompiled bundle's `signOutClickEvent`). ★ The hamburger PANEL's own "Sign Out" button
+    // (the one just clicked, above) is NOT necessarily unmounted/hidden the instant this modal
+    // opens on top of it -- Angular components commonly stay CSS-visible while merely obscured by
+    // a later dialog. A prior version of this locator searched the whole page for ANY visible
+    // "sign out"-named button and took `.first()`, which could resolve back to that SAME leftover
+    // panel button instead of the modal's actual confirm action -- re-clicking it would just
+    // re-invoke `signOutClickEvent` (harmless/no-op, since the modal it opens is presumably
+    // already open) rather than ever firing the real `b2cSignOutInitiate`, so the session never
+    // actually signs out and the panel keeps showing "Sign Out" on every later check. Scope
+    // strictly to the dialog itself (`getByRole('dialog')`) and require an EXACT "Sign out" name
+    // (not a substring match) so it can only match the modal's own confirm action.
+    const confirmDialog = page
+      .getByRole("dialog")
+      .filter({ visible: true })
+      .first();
+    const confirmSignOut = confirmDialog
+      .getByRole("button", { name: /^sign out$/i })
       .filter({ visible: true })
       .first();
     const confirmVisible = await confirmSignOut
@@ -468,14 +483,38 @@ test("Meals2Go: signed-in carryout order summary + payment method", async ({
     await page.waitForURL(/meals2go\.com/, { timeout: 45_000 }).catch(() => {});
 
     await hamburgerMenu().click({ force: true, timeout: 10_000 });
-    await expect(
-      page
-        .getByRole("link", { name: /^sign in$/i })
-        .or(page.getByRole("button", { name: /^sign in$/i }))
-        .or(page.locator(".greeting-sign-in"))
+
+    // ★ Diagnostic for the NEXT failure report, if any: if "Sign In" never reappears, check
+    // whether the panel is still showing "Sign Out" (session never actually ended -- e.g. the
+    // confirm click above hit the wrong element again) vs neither being visible (panel didn't
+    // reopen / a different affordance is used) so the error message pinpoints which case it is.
+    const signInAffordance = page
+      .getByRole("link", { name: /^sign in$/i })
+      .or(page.getByRole("button", { name: /^sign in$/i }))
+      .or(page.locator(".greeting-sign-in"))
+      .filter({ visible: true })
+      .first();
+    const signInAppeared = await signInAffordance
+      .waitFor({ state: "visible", timeout: 45_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!signInAppeared) {
+      const stillSignedOutButtonVisible = await page
+        .getByRole("link", { name: /sign out/i })
+        .or(page.getByRole("button", { name: /sign out/i }))
         .filter({ visible: true })
-        .first(),
-      "STEP: sign-in affordance did not reappear after sign out.",
-    ).toBeVisible({ timeout: 45_000 });
+        .first()
+        .isVisible()
+        .catch(() => false);
+      await expect(
+        signInAffordance,
+        stillSignedOutButtonVisible
+          ? "STEP: sign-in affordance did not reappear after sign out -- panel still shows " +
+              "'Sign Out', so the session never actually ended (confirm click likely hit the " +
+              "wrong element)."
+          : "STEP: sign-in affordance did not reappear after sign out, and no 'Sign Out' " +
+              "control is visible either -- the hamburger panel may not have reopened as expected.",
+      ).toBeVisible({ timeout: 1 });
+    }
   });
 });
