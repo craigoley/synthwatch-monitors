@@ -117,6 +117,18 @@ test("Wine, Beer & Spirits DOB-gated checkout Terraform flow", async ({
 
   await applyWegmansHeaders(page);
   await page.route("**/monitoring?*", (route) => route.abort());
+  // Block non-essential ad/tracker/chat-widget third parties. The live trace
+  // showed 681 third-party requests (~43MB) per run — this noise dominates
+  // navigation time on a cold/uncached preview run and was the primary
+  // driver of the "preview flow budget (90000ms) exhausted" failure, not
+  // any single slow first-party step. None of these hosts are required for
+  // the checkout/DOB-gate flow under test.
+  const blockedThirdPartyHosts =
+    /(doubleclick\.net|googleadservices\.com|googletagmanager\.com|google-analytics\.com|facebook\.net|facebook\.com|demdex\.net|adobedc\.net|instagram\.com|rlcdn\.com|astutebot\.com|emplifi\.io|fwcdn3\.com|fwpixel\.com|launchdarkly\.com\/events)/i;
+  await page.route(
+    (url) => blockedThirdPartyHosts.test(url.href),
+    (route) => route.abort(),
+  );
 
   await step("Navigate to homepage and sign in", async () => {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
